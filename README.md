@@ -13,6 +13,7 @@ The rules are generalised from detection problems that come up in day-to-day SOC
 | [Leaver bulk download](detections/exfiltration/leaver-bulk-download/) | OfficeActivity + Leavers watchlist | T1530, T1213 | Compares each leaver to **their own** 30-day baseline, not a global threshold |
 | [SSH brute force → success](detections/credential-access/ssh-bruteforce-then-success/) | Syslog | T1110.001, T1078 | Alerts on the *success* after a failure burst, not the noise |
 | [Short-lived Linux account](detections/persistence/linux-short-lived-account/) | Syslog | T1136.001, T1070.009 | Create + delete within 1h, plus SSH logins during the account's lifetime |
+| [Suspicious MFA method change](detections/persistence/suspicious-mfa-method-change/) | AuditLogs + SigninLogs + OfficeActivity + SecurityAlert | T1098.005, T1556.006 | **Risk score** from 14 signals (new country, risky sign-in, spray before, inbox rules, other alerts…) with the reasons listed in the alert |
 | [Entra ID password spray](detections/credential-access/entra-password-spray/) | SigninLogs | T1110.003 | Wide-and-shallow shape (many accounts, ≤3 tries each); escalates on any success |
 | [MFA fatigue](detections/credential-access/mfa-fatigue/) | SigninLogs | T1621 | Repeated denials, then flags an approval that follows |
 | [External mail forwarding](detections/collection/inbox-forwarding-external/) | OfficeActivity | T1114.003 | Parses inbox-rule and mailbox parameters, splits recipients, checks domains |

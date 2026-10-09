@@ -1,0 +1,221 @@
+id: 7ae35f4f-5ec6-40f6-9dbd-ae1b993628a1
+name: Suspicious MFA / security info change (risk-scored)
+description: |
+  A user's authentication methods are registered, changed or deleted in Entra ID, and the change comes with
+  enough supporting evidence to be worth an analyst's time: new country or IP compared with the user's own
+  baseline, a risky sign-in, password spray or risky sign-ins in the 24h before, forwarding/delete inbox rules,
+  other alerts on the user, a method added by someone else, or a delete-and-re-add swap. Attackers who steal
+  a session (AiTM phishing, token theft) register their own MFA method to keep access, so this is one of the
+  most valuable persistence signals in Entra ID. Each signal adds to a score; the alert fires above a threshold
+  and lists the reasons.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+      - SigninLogs
+  - connectorId: Office365
+    dataTypes:
+      - OfficeActivity
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+  - CredentialAccess
+relevantTechniques:
+  - T1098.005
+  - T1556.006
+query: |
+  // ===== Parameters =====
+  let runEnd          = now();
+  let lookback        = 1h;     // match the rule frequency
+  let maxIngestDelay  = 1d;     // registrations that arrive late are still picked up (selected by ingestion time)
+  let sigWindow       = 1h;     // how far before the change to look for the sign-in behind it
+  let baselineDays    = 13d;    // + maxIngestDelay must stay within Sentinel's 14d query period
+  let scoreThreshold  = 4;      // backtest before changing (see README)
+  let highThreshold   = 7;
+  // Microsoft backend IPs that appear as InitiatedBy.user.ipAddress for some self-service
+  // registrations - not the user's client. Populate from your own AuditLogs.
+  let backendRanges   = dynamic([]);
+  let trustedIPs      = dynamic([]);        // corporate egress IPs, never counted as "new"
+  let allowedAdmins   = dynamic([]);        // helpdesk/IAM accounts allowed to add methods for others
+  let internalDomains = dynamic(["contoso.com"]);
+  let privilegedPattern = @"^(admin\.|adm-|svc\.)";   // naming fallback if IdentityInfo/UEBA is not enabled
+  let regStart = runEnd - lookback;
+  // ===== 1. Auth-method changes =====
+  let reg = AuditLogs
+      | where TimeGenerated > regStart - maxIngestDelay
+      | where ingestion_time() between (regStart .. runEnd)
+      | where OperationName in ("User registered security info", "User registered all required security info",
+                                "User deleted security info", "User changed default security info",
+                                "Admin registered security info", "Admin deleted security info", "Admin updated security info")
+      | where Result =~ "success"
+      | extend TargetUPN   = tolower(tostring(TargetResources[0].userPrincipalName)),
+               TargetId    = tolower(tostring(TargetResources[0].id)),
+               Initiator   = tolower(tostring(InitiatedBy.user.userPrincipalName)),
+               InitiatorIP = tostring(InitiatedBy.user.ipAddress)
+      | where isnotempty(TargetUPN)
+      | extend IsBackend = coalesce(ipv4_is_in_any_range(InitiatorIP, backendRanges), false)
+      | extend ClientIPFromAudit = iff(isnotempty(InitiatorIP) and not(IsBackend), InitiatorIP, "")
+      | extend AdminAction = isnotempty(Initiator) and Initiator != TargetUPN and not(Initiator in (allowedAdmins));
+  let userList = toscalar(reg | summarize make_set(TargetUPN));
+  let earliestReg = toscalar(reg | summarize min(TimeGenerated));
+  let bulkUsers = toscalar(reg | where ResultReason has_any ("Fido2", "Passkey") | summarize dcount(TargetUPN));
+  let regAgg = reg
+      | summarize FirstReg = min(TimeGenerated), LastReg = max(TimeGenerated),
+                  Methods = make_set(ResultReason, 20),
+                  Operations = make_set(OperationName, 10),
+                  AuditClientIPs = make_set_if(ClientIPFromAudit, isnotempty(ClientIPFromAudit), 10),
+                  AdminInitiators = make_set_if(Initiator, AdminAction, 5),
+                  DeletedCount = countif(OperationName has "deleted")
+                  by TargetUPN, TargetId;
+  // ===== 2. The sign-in behind the change: last successful sign-in at or before the first change =====
+  let signins = SigninLogs
+      | where TimeGenerated between ((earliestReg - sigWindow) .. runEnd)
+      | where ResultType == "0"
+      | extend TargetUPN = tolower(UserPrincipalName)
+      | where TargetUPN in (userList)
+      | project SignTime = TimeGenerated, TargetUPN, SignIP = IPAddress,
+                SignCountry = tostring(LocationDetails.countryOrRegion), SignCity = tostring(LocationDetails.city),
+                SignApp = AppDisplayName, DeviceName = tostring(DeviceDetail.displayName),
+                DeviceOS = tostring(DeviceDetail.operatingSystem),
+                IsManaged = tobool(DeviceDetail.isManaged), IsCompliant = tobool(DeviceDetail.isCompliant),
+                SignRisk = RiskLevelDuringSignIn, UserAgent;
+  let matched = regAgg
+      | project TargetUPN, FirstReg
+      | join kind=inner signins on TargetUPN
+      | where SignTime between ((FirstReg - sigWindow) .. FirstReg)
+      | summarize arg_max(SignTime, SignIP, SignCountry, SignCity, SignApp, DeviceName, DeviceOS,
+                          IsManaged, IsCompliant, SignRisk, UserAgent) by TargetUPN;
+  // ===== 3. Per-user baseline, ending before the change =====
+  let baseline = SigninLogs
+      | where TimeGenerated between ((earliestReg - baselineDays) .. earliestReg)
+      | where ResultType == "0"
+      | extend TargetUPN = tolower(UserPrincipalName)
+      | where TargetUPN in (userList)
+      | summarize KnownIPs = make_set(IPAddress, 1000),
+                  KnownCountries = make_set(tostring(LocationDetails.countryOrRegion), 50) by TargetUPN;
+  // ===== 4. Attack signals in the 24h before =====
+  let preAttack = SigninLogs
+      | where TimeGenerated between ((earliestReg - 1d) .. runEnd)
+      | extend TargetUPN = tolower(UserPrincipalName)
+      | where TargetUPN in (userList)
+      | summarize FailedSignIns = countif(ResultType != "0"),
+                  BlockedOrBadPwd = countif(ResultType in ("50053", "50126")),
+                  FailCountries = dcountif(tostring(LocationDetails.countryOrRegion), ResultType != "0"),
+                  RiskySignIns = countif(RiskLevelDuringSignIn in ("medium", "high"))
+                  by TargetUPN;
+  // ===== 5. Inbox rules / mailbox forwarding to external, or delete rules (24h) =====
+  let forwardParams = dynamic(["ForwardTo", "RedirectTo", "ForwardAsAttachmentTo", "ForwardingSmtpAddress", "ForwardingAddress"]);
+  let mailbox = OfficeActivity
+      | where TimeGenerated between ((earliestReg - 1d) .. runEnd)
+      | where Operation in ("New-InboxRule", "Set-InboxRule", "Set-Mailbox")
+      | extend TargetUPN = tolower(UserId)
+      | where TargetUPN in (userList)
+      | mv-apply P = todynamic(Parameters) on (
+          extend N = tostring(P.Name), V = tostring(P.Value)
+          | extend Domains = extract_all(@"@([a-z0-9.-]+)", tolower(V))
+          | where (N =~ "DeleteMessage" and V =~ "True")
+               or (N in~ (forwardParams) and isnotempty(V)
+                   and (array_length(Domains) == 0 or array_length(set_difference(Domains, internalDomains)) > 0))
+          | summarize Hits = make_set(strcat(N, "=", V), 5))
+      | where array_length(Hits) > 0
+      | summarize SuspInboxRules = count(), InboxRuleSample = make_set(Hits, 5) by TargetUPN;
+  // ===== 6. Other alerts on the user (7d), matched on object id or Name@UPNSuffix =====
+  let idKeys = union (regAgg | project Key = TargetId, TargetUPN), (regAgg | project Key = TargetUPN, TargetUPN)
+      | where isnotempty(Key)
+      | distinct Key, TargetUPN;
+  let priorAlerts = SecurityAlert
+      | where TimeGenerated between ((runEnd - 7d) .. runEnd)
+      | where AlertName !has "security info"
+      | mv-expand Ent = todynamic(Entities)
+      | where tostring(Ent.Type) =~ "account"
+      | extend Keys = pack_array(tolower(tostring(Ent.AadUserId)),
+                                 tolower(strcat(tostring(Ent.Name), "@", tostring(Ent.UPNSuffix))))
+      | mv-expand Key = Keys to typeof(string)
+      | join kind=inner idKeys on Key
+      | summarize PriorAlerts = dcount(SystemAlertId), PriorAlertNames = make_set(AlertName, 5) by TargetUPN;
+  // ===== 7. Privileged accounts (IdentityInfo if UEBA is on, naming convention otherwise) =====
+  let privileged = union isfuzzy=true
+      (IdentityInfo
+          | where TimeGenerated > ago(14d)
+          | extend TargetUPN = tolower(AccountUPN)
+          | where TargetUPN in (userList)
+          | summarize arg_max(TimeGenerated, AssignedRoles) by TargetUPN
+          | where array_length(AssignedRoles) > 0
+          | project TargetUPN, PrivRoles = AssignedRoles),
+      (datatable(TargetUPN: string, PrivRoles: dynamic)[]);
+  // ===== 8. Combine and score =====
+  regAgg
+  | join kind=leftouter matched     on TargetUPN
+  | join kind=leftouter baseline    on TargetUPN
+  | join kind=leftouter preAttack   on TargetUPN
+  | join kind=leftouter mailbox     on TargetUPN
+  | join kind=leftouter priorAlerts on TargetUPN
+  | join kind=leftouter privileged  on TargetUPN
+  | extend ClientIP = coalesce(SignIP, tostring(AuditClientIPs[0]))
+  // Every flag is coalesced so a missing join (null) can never null out the score
+  | extend HasBaseline   = coalesce(array_length(KnownIPs), 0) > 0,
+           NoSignInFound = isempty(SignIP) and coalesce(array_length(AuditClientIPs), 0) == 0
+  | extend NewIP       = coalesce(isnotempty(ClientIP) and HasBaseline and not(set_has_element(KnownIPs, ClientIP)) and not(ClientIP in (trustedIPs)), false),
+           NewCountry  = coalesce(isnotempty(SignCountry) and HasBaseline and not(set_has_element(KnownCountries, SignCountry)), false),
+           Unmanaged   = isnotempty(SignIP) and not(coalesce(IsManaged, false)),
+           RiskyAtReg  = coalesce(SignRisk in ("medium", "high"), false),
+           WeakMethod  = tostring(Methods) has_any ("Phone", "SMS", "Authenticator App with Code", "Software Oath"),
+           PrivAcct    = coalesce(array_length(PrivRoles), 0) > 0
+                         or TargetUPN matches regex privilegedPattern,
+           SprayBefore = coalesce(BlockedOrBadPwd, 0) >= 10 or coalesce(FailCountries, 0) >= 3,
+           RiskyBefore = coalesce(RiskySignIns, 0) > 0,
+           InboxAbuse  = coalesce(SuspInboxRules, 0) > 0,
+           HasAlerts   = coalesce(PriorAlerts, 0) > 0,
+           AdminAdded  = coalesce(array_length(AdminInitiators), 0) > 0,
+           SwapPattern = DeletedCount > 0 and tostring(Operations) has "registered"
+  | extend Score =
+        3 * toint(NewCountry) + 3 * toint(RiskyAtReg) + 3 * toint(InboxAbuse)
+      + 2 * toint(AdminAdded) + 2 * toint(SprayBefore) + 2 * toint(RiskyBefore) + 2 * toint(HasAlerts)
+      + 1 * toint(NewIP) + 1 * toint(Unmanaged) + 1 * toint(NoSignInFound) + 1 * toint(not(HasBaseline))
+      + 1 * toint(WeakMethod and Unmanaged) + 1 * toint(PrivAcct) + 1 * toint(SwapPattern)
+  | extend Reasons = strcat_array(array_concat(
+        iff(NewCountry,  dynamic(["New country"]), dynamic([])),
+        iff(RiskyAtReg,  dynamic(["Risky sign-in at registration"]), dynamic([])),
+        iff(InboxAbuse,  dynamic(["External forward/delete inbox rule in 24h"]), dynamic([])),
+        iff(AdminAdded,  dynamic(["Method changed by another account"]), dynamic([])),
+        iff(SprayBefore, dynamic(["Spray/brute force in prior 24h"]), dynamic([])),
+        iff(RiskyBefore, dynamic(["Risky sign-ins in prior 24h"]), dynamic([])),
+        iff(HasAlerts,   dynamic(["Other alerts on user (7d)"]), dynamic([])),
+        iff(NewIP,       dynamic(["New IP"]), dynamic([])),
+        iff(Unmanaged,   dynamic(["Unmanaged device"]), dynamic([])),
+        iff(NoSignInFound, dynamic(["No sign-in context"]), dynamic([])),
+        iff(not(HasBaseline), dynamic(["No 14d baseline"]), dynamic([])),
+        iff(WeakMethod and Unmanaged, dynamic(["Weak method from unmanaged device"]), dynamic([])),
+        iff(PrivAcct,    dynamic(["Privileged account"]), dynamic([])),
+        iff(SwapPattern, dynamic(["Method deleted and re-added"]), dynamic([]))), " | ")
+  | extend BulkRolloutContext = strcat(bulkUsers, " users registered FIDO2/passkey in this window")
+  | where Score >= scoreThreshold
+  | extend AlertSeverity = iff(Score >= highThreshold, "High", "Medium")
+  | project AlertSeverity, FirstReg, LastReg, TargetUPN, Score, Reasons, Methods, Operations,
+            ClientIP, SignCountry, SignCity, SignApp, DeviceName, DeviceOS, IsManaged, IsCompliant, SignRisk,
+            AdminInitiators, FailedSignIns, BlockedOrBadPwd, FailCountries, RiskySignIns,
+            SuspInboxRules, InboxRuleSample, PriorAlerts, PriorAlertNames, BulkRolloutContext, UserAgent
+  | order by Score desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: TargetUPN
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: ClientIP
+customDetails:
+  Score: Score
+  Reasons: Reasons
+  BulkRollout: BulkRolloutContext
+alertDetailsOverride:
+  alertDisplayNameFormat: "Suspicious MFA method change for {{TargetUPN}} (score {{Score}})"
+  alertDescriptionFormat: "Reasons: {{Reasons}}"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled
