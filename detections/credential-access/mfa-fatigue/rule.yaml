@@ -1,0 +1,69 @@
+id: 9bc98993-0dee-48f2-9df6-801878c8c402
+name: MFA fatigue - repeated MFA denials, possibly followed by approval
+description: |
+  A user denies (or ignores) several MFA prompts within an hour. The password is already known to whoever
+  triggers the prompts, so this alone is worth a look. If an MFA-approved sign-in follows, the user most
+  likely gave in to the push spam and the account should be treated as compromised.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - InitialAccess
+relevantTechniques:
+  - T1621
+  - T1078.004
+query: |
+  let minDenials = 5;
+  // 500121 = authentication failed during strong authentication request (denied, ignored, timed out, fraud reported)
+  let denials = SigninLogs
+      | where TimeGenerated > ago(1h)
+      | where ResultType == "500121"
+      | extend Detail = tostring(Status.additionalDetails)
+      | summarize Denials = count(),
+                  FraudReported = countif(Detail has "fraud"),
+                  FirstDenial = min(TimeGenerated),
+                  LastDenial = max(TimeGenerated),
+                  DenialIPs = make_set(IPAddress, 10),
+                  DenialLocations = make_set(Location, 5),
+                  Details = make_set(Detail, 5)
+                  by UserPrincipalName
+      | where Denials >= minDenials or FraudReported > 0;
+  let approvals = SigninLogs
+      | where TimeGenerated > ago(1h)
+      | where ResultType == "0" and AuthenticationRequirement == "multiFactorAuthentication"
+      | project ApprovalTime = TimeGenerated, UserPrincipalName, ApprovalIP = IPAddress, ApprovalApp = AppDisplayName;
+  denials
+  | join kind=leftouter approvals on UserPrincipalName
+  | extend ApprovalTime = iff(ApprovalTime >= FirstDenial, ApprovalTime, datetime(null))
+  | summarize ApprovedAfterDenials = min(ApprovalTime),
+              ApprovalIPs = make_set_if(ApprovalIP, isnotnull(ApprovalTime), 5),
+              ApprovalApps = make_set_if(ApprovalApp, isnotnull(ApprovalTime), 5),
+              take_any(Denials, FraudReported, FirstDenial, LastDenial, DenialIPs, DenialLocations, Details)
+              by UserPrincipalName
+  | extend Outcome = case(isnotnull(ApprovedAfterDenials), "Approved after repeated denials",
+                          FraudReported > 0, "User reported fraud",
+                          "Repeated denials, no approval"),
+           AlertSeverity = iff(isnotnull(ApprovedAfterDenials), "High", "Medium"),
+           ApprovalFromDenialIP = set_has_element(DenialIPs, tostring(ApprovalIPs[0]))
+  | project AlertSeverity, Outcome, UserPrincipalName, Denials, FraudReported, FirstDenial, LastDenial,
+            ApprovedAfterDenials, ApprovalIPs, ApprovalFromDenialIP, ApprovalApps, DenialIPs, DenialLocations, Details
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  Outcome: Outcome
+  Denials: Denials
+alertDetailsOverride:
+  alertDisplayNameFormat: "MFA fatigue on {{UserPrincipalName}}: {{Outcome}}"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

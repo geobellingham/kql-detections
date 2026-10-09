@@ -1,0 +1,81 @@
+id: d28015b4-fde0-45fa-b669-e6f52365611d
+name: SSH brute force followed by successful login (Linux Syslog)
+description: |
+  A single source IP generates many failed SSH logins against a Linux host and then logs in
+  successfully from that same IP. Failed-login noise on internet-facing SSH is constant; the
+  success afterwards is what turns it into an incident.
+severity: High
+requiredDataConnectors:
+  - connectorId: Syslog
+    dataTypes:
+      - Syslog
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - InitialAccess
+relevantTechniques:
+  - T1110.001
+  - T1078
+query: |
+  let failThreshold = 20;
+  let ipRegex = @"from\s+([0-9a-fA-F:.]+)\s+port";
+  let ssh = Syslog
+      | where TimeGenerated > ago(1h)
+      | where Facility in ("auth", "authpriv") and ProcessName == "sshd"
+      | extend Outcome = case(
+          SyslogMessage startswith "Failed password" or SyslogMessage startswith "Failed publickey", "Failure",
+          SyslogMessage startswith "Invalid user", "Failure",
+          SyslogMessage startswith "Accepted ", "Success",
+          "Other")
+      | where Outcome != "Other"
+      | extend SrcIP = extract(ipRegex, 1, SyslogMessage),
+               TargetUser = coalesce(
+                   extract(@"for\s+(?:invalid user\s+)?(\S+)\s+from", 1, SyslogMessage),
+                   extract(@"^Invalid user\s+(\S+)\s+from", 1, SyslogMessage))
+      | where isnotempty(SrcIP);
+  let failures = ssh
+      | where Outcome == "Failure"
+      | summarize FailedAttempts = count(),
+                  DistinctUsersTried = dcount(TargetUser),
+                  UsersTried = make_set(TargetUser, 25),
+                  FirstFailure = min(TimeGenerated),
+                  LastFailure = max(TimeGenerated)
+                  by SrcIP, Computer
+      | where FailedAttempts >= failThreshold;
+  let successes = ssh
+      | where Outcome == "Success"
+      | project SuccessTime = TimeGenerated, SrcIP, Computer, LoggedInUser = TargetUser,
+                AuthMethod = extract(@"^Accepted\s+(\S+)", 1, SyslogMessage);
+  failures
+  | join kind=inner successes on SrcIP, Computer
+  | where SuccessTime > FirstFailure
+  | summarize arg_min(SuccessTime, LoggedInUser, AuthMethod),
+                take_any(FailedAttempts, DistinctUsersTried, UsersTried, FirstFailure, LastFailure)
+                by SrcIP, Computer
+  | extend AttackDurationSec = datetime_diff('second', LastFailure, FirstFailure),
+           UserWasTargeted = set_has_element(UsersTried, LoggedInUser)
+  | project SuccessTime, Computer, SrcIP, LoggedInUser, AuthMethod, FailedAttempts, DistinctUsersTried,
+            UsersTried, UserWasTargeted, FirstFailure, LastFailure, AttackDurationSec
+entityMappings:
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: Computer
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SrcIP
+  - entityType: Account
+    fieldMappings:
+      - identifier: Name
+        columnName: LoggedInUser
+customDetails:
+  FailedAttempts: FailedAttempts
+  AuthMethod: AuthMethod
+alertDetailsOverride:
+  alertDisplayNameFormat: "SSH login as {{LoggedInUser}} on {{Computer}} after {{FailedAttempts}} failures from {{SrcIP}}"
+version: 1.0.0
+kind: Scheduled

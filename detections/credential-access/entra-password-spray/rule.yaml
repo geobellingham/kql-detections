@@ -1,0 +1,61 @@
+id: 96eec599-32db-4bf4-b99f-f165c6399d4d
+name: Password spray against Entra ID from a single IP
+description: |
+  One IP fails sign-ins against many different accounts with only a few attempts each, which is the
+  shape of a password spray (one or two common passwords tried across the directory) rather than a
+  brute force against one account. Flags any account the same IP then signed into successfully.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+relevantTechniques:
+  - T1110.003
+query: |
+  let minFailedAccounts = 15;
+  let maxAttemptsPerAccount = 3.0;   // above this it looks like brute force, not spray
+  // 50126 invalid username/password, 50053 locked/smart lockout, 50055 expired password, 50056 no password
+  let failureCodes = dynamic(["50126", "50053", "50055", "50056"]);
+  SigninLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType in (failureCodes) or ResultType == "0"
+  | summarize
+      Attempts = countif(ResultType != "0"),
+      FailedAccounts = dcountif(UserPrincipalName, ResultType != "0"),
+      LockedOutAccounts = dcountif(UserPrincipalName, ResultType == "50053"),
+      SuccessfulAccounts = make_set_if(UserPrincipalName, ResultType == "0", 50),
+      SampleTargets = make_set_if(UserPrincipalName, ResultType != "0", 25),
+      Apps = make_set(AppDisplayName, 10),
+      ClientApps = make_set(ClientAppUsed, 10),
+      UserAgents = make_set(UserAgent, 10),
+      Locations = make_set(Location, 5),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by IPAddress
+  | where FailedAccounts >= minFailedAccounts
+  | extend AttemptsPerAccount = round(todouble(Attempts) / FailedAccounts, 2)
+  | where AttemptsPerAccount <= maxAttemptsPerAccount
+  | extend SuccessCount = array_length(SuccessfulAccounts),
+           PossibleCompromise = array_length(SuccessfulAccounts) > 0
+  | extend AlertSeverity = iff(PossibleCompromise, "High", "Medium")
+  | project AlertSeverity, FirstSeen, LastSeen, IPAddress, FailedAccounts, Attempts, AttemptsPerAccount, LockedOutAccounts,
+            PossibleCompromise, SuccessCount, SuccessfulAccounts, SampleTargets, Apps, ClientApps, UserAgents, Locations
+entityMappings:
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  FailedAccounts: FailedAccounts
+  PossibleCompromise: PossibleCompromise
+alertDetailsOverride:
+  alertDisplayNameFormat: "Password spray from {{IPAddress}} against {{FailedAccounts}} accounts"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

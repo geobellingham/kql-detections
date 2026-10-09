@@ -1,0 +1,79 @@
+id: f57df9c0-ecc9-455e-bb7b-8e3bb8c79296
+name: AWS IAM privilege escalation or credential creation for another identity
+description: |
+  An IAM identity grants admin-level permissions (AdministratorAccess, or an inline policy with Action "*"),
+  opens up a role's trust policy, or creates login credentials or access keys for a *different* user.
+  These are the common IAM paths from one foothold to full account control and persistence.
+severity: High
+requiredDataConnectors:
+  - connectorId: AWS
+    dataTypes:
+      - AWSCloudTrail
+  - connectorId: AwsS3
+    dataTypes:
+      - AWSCloudTrail
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1098.001
+  - T1098.003
+  - T1078.004
+query: |
+  // Roles allowed to do IAM changes (IaC pipelines, break-glass) - tune per environment
+  let approvedIamAdmins = dynamic(["arn:aws:iam::111111111111:role/terraform-deployer"]);
+  AWSCloudTrail
+  | where TimeGenerated > ago(1h)
+  | where EventSource == "iam.amazonaws.com" and isempty(ErrorCode)
+  | where EventName in ("AttachUserPolicy", "AttachRolePolicy", "AttachGroupPolicy",
+                        "PutUserPolicy", "PutRolePolicy", "PutGroupPolicy",
+                        "CreateAccessKey", "CreateLoginProfile", "UpdateLoginProfile",
+                        "UpdateAssumeRolePolicy", "AddUserToGroup")
+  | extend Req = todynamic(RequestParameters)
+  | extend PolicyArn = tostring(Req.policyArn),
+           TargetUser = tostring(Req.userName),
+           TargetRole = tostring(Req.roleName),
+           TargetGroup = tostring(Req.groupName),
+           PolicyDoc = url_decode(coalesce(tostring(Req.policyDocument), "")),
+           ActorUser = coalesce(UserIdentityUserName, tostring(split(UserIdentityArn, "/")[-1]))
+  | extend Reason = case(
+      PolicyArn endswith "/AdministratorAccess" or PolicyArn endswith "/IAMFullAccess", strcat("Attached ", tostring(split(PolicyArn, "/")[-1])),
+      EventName startswith "Put" and PolicyDoc matches regex @"""Action""\s*:\s*(\[\s*)?""\*""" and PolicyDoc matches regex @"""Effect""\s*:\s*""Allow""",
+          "Inline policy allowing Action *",
+      EventName == "UpdateAssumeRolePolicy" and PolicyDoc matches regex @"""AWS""\s*:\s*""\*""", "Role trust policy opened to any AWS principal",
+      EventName == "UpdateAssumeRolePolicy", "Role trust policy changed",
+      EventName in ("CreateAccessKey", "CreateLoginProfile", "UpdateLoginProfile") and isnotempty(TargetUser) and TargetUser != ActorUser,
+          strcat(EventName, " for another user"),
+      EventName == "AddUserToGroup" and TargetGroup has_any ("admin", "administrators"), "User added to admin group",
+      "")
+  | where isnotempty(Reason)
+  | where not(UserIdentityArn in (approvedIamAdmins))
+  | extend Target = coalesce(TargetUser, TargetRole, TargetGroup),
+           AlertSeverity = iff(Reason == "Role trust policy changed", "Medium", "High")
+  | project TimeGenerated, AlertSeverity, Reason, EventName, RecipientAccountId, UserIdentityArn, UserIdentityType,
+            ActorUser, Target, PolicyArn, SourceIpAddress, UserAgent, AWSRegion, SessionMfaAuthenticated, RequestParameters
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: Name
+        columnName: ActorUser
+  - entityType: Account
+    fieldMappings:
+      - identifier: Name
+        columnName: Target
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SourceIpAddress
+customDetails:
+  Reason: Reason
+  AwsAccount: RecipientAccountId
+alertDetailsOverride:
+  alertDisplayNameFormat: "AWS IAM: {{Reason}} ({{ActorUser}} -> {{Target}})"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

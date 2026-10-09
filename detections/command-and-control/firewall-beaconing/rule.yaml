@@ -1,0 +1,74 @@
+id: fb9b17d3-e07f-4689-8c40-6d7c9678f33f
+name: Periodic beaconing to a rare external destination (FortiGate)
+description: |
+  An internal host connects to the same external IP and port at a near-constant interval, many times a day,
+  and few or no other internal hosts talk to that destination. Regular timing to a rare destination is the
+  signature of malware or C2 implants checking in.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: Fortinet
+    dataTypes:
+      - CommonSecurityLog
+queryFrequency: 1d
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+relevantTechniques:
+  - T1071
+  - T1573
+query: |
+  let minConnections = 30;      // at least this many check-ins in 24h
+  let maxJitter = 0.2;          // stdev / mean of the gap between connections
+  let minIntervalSec = 30;      // ignore sub-30s chatter (streaming, keep-alives)
+  let maxPrevalence = 3;        // destination is contacted by at most this many internal hosts
+  let flows = CommonSecurityLog
+      | where TimeGenerated > ago(1d)
+      | where DeviceVendor == "Fortinet"
+      | where DeviceAction !in~ ("deny", "drop", "block", "blocked")
+      | where isnotempty(DestinationIP) and isnotempty(SourceIP)
+      | where ipv4_is_private(SourceIP) and not(ipv4_is_private(DestinationIP))
+      | project TimeGenerated, SourceIP, DestinationIP, DestinationPort, SentBytes, DestinationHostName;
+  let rareDestinations = flows
+      | summarize InternalHosts = dcount(SourceIP) by DestinationIP
+      | where InternalHosts <= maxPrevalence;
+  flows
+  | join kind=inner rareDestinations on DestinationIP
+  | sort by SourceIP asc, DestinationIP asc, DestinationPort asc, TimeGenerated asc
+  | extend SameFlow = SourceIP == prev(SourceIP) and DestinationIP == prev(DestinationIP) and DestinationPort == prev(DestinationPort)
+  | extend GapSec = iff(SameFlow, datetime_diff('second', TimeGenerated, prev(TimeGenerated)), long(null))
+  | summarize Connections = count(),
+              AvgGapSec = avg(GapSec),
+              StdGapSec = stdev(GapSec),
+              MedianGapSec = percentile(GapSec, 50),
+              AvgSentBytes = avg(SentBytes),
+              StdSentBytes = stdev(SentBytes),
+              HostNames = make_set(DestinationHostName, 5),
+              FirstSeen = min(TimeGenerated),
+              LastSeen = max(TimeGenerated)
+              by SourceIP, DestinationIP, DestinationPort, InternalHosts
+  | where Connections >= minConnections and AvgGapSec >= minIntervalSec
+  | extend Jitter = round(StdGapSec / AvgGapSec, 3),
+           SizeJitter = iff(AvgSentBytes > 0, round(StdSentBytes / AvgSentBytes, 3), real(null))
+  | where Jitter <= maxJitter
+  | project FirstSeen, LastSeen, SourceIP, DestinationIP, DestinationPort, HostNames, Connections,
+            AvgGapSec = round(AvgGapSec, 0), MedianGapSec, Jitter, AvgSentBytes = round(AvgSentBytes, 0), SizeJitter, InternalHosts
+  | sort by Jitter asc
+entityMappings:
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SourceIP
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: DestinationIP
+customDetails:
+  AvgGapSec: AvgGapSec
+  Jitter: Jitter
+  Connections: Connections
+alertDetailsOverride:
+  alertDisplayNameFormat: "{{SourceIP}} beaconing to {{DestinationIP}}:{{DestinationPort}} every ~{{AvgGapSec}}s"
+version: 1.0.0
+kind: Scheduled

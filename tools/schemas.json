@@ -1,0 +1,45 @@
+{
+  "SigninLogs": {
+    "TimeGenerated": "datetime", "UserPrincipalName": "string", "UserId": "string", "IPAddress": "string",
+    "ResultType": "string", "ResultDescription": "string", "AppDisplayName": "string", "UserAgent": "string",
+    "Location": "string", "LocationDetails": "dynamic", "Status": "dynamic", "AuthenticationRequirement": "string",
+    "ConditionalAccessStatus": "string", "CorrelationId": "string", "ClientAppUsed": "string"
+  },
+  "AuditLogs": {
+    "TimeGenerated": "datetime", "OperationName": "string", "Result": "string", "Category": "string",
+    "TargetResources": "dynamic", "InitiatedBy": "dynamic", "CorrelationId": "string"
+  },
+  "OfficeActivity": {
+    "TimeGenerated": "datetime", "Operation": "string", "OfficeWorkload": "string", "RecordType": "string",
+    "UserId": "string", "ClientIP": "string", "ResultStatus": "string", "Parameters": "string",
+    "SourceFileName": "string", "SourceFileExtension": "string", "SourceRelativeUrl": "string",
+    "Site_Url": "string", "OfficeObjectId": "string", "UserAgent": "string"
+  },
+  "Syslog": {
+    "TimeGenerated": "datetime", "Computer": "string", "HostName": "string", "HostIP": "string",
+    "Facility": "string", "SeverityLevel": "string", "ProcessName": "string", "ProcessID": "int",
+    "SyslogMessage": "string"
+  },
+  "CommonSecurityLog": {
+    "TimeGenerated": "datetime", "DeviceVendor": "string", "DeviceProduct": "string", "DeviceAction": "string",
+    "Activity": "string", "SourceIP": "string", "SourceUserName": "string", "DestinationIP": "string",
+    "DestinationPort": "int", "DestinationHostName": "string", "RequestURL": "string", "RequestMethod": "string",
+    "FileType": "string", "SentBytes": "long", "ReceivedBytes": "long", "ApplicationProtocol": "string",
+    "Protocol": "string", "DeviceName": "string"
+  },
+  "DeviceProcessEvents": {
+    "Timestamp": "datetime", "TimeGenerated": "datetime", "DeviceId": "string", "DeviceName": "string",
+    "AccountName": "string", "AccountDomain": "string", "AccountUpn": "string", "FileName": "string",
+    "FolderPath": "string", "SHA256": "string", "ProcessCommandLine": "string",
+    "ProcessVersionInfoOriginalFileName": "string", "InitiatingProcessFileName": "string",
+    "InitiatingProcessCommandLine": "string", "InitiatingProcessAccountName": "string",
+    "InitiatingProcessParentFileName": "string", "ReportId": "long"
+  },
+  "AWSCloudTrail": {
+    "TimeGenerated": "datetime", "EventName": "string", "EventSource": "string", "EventTypeName": "string",
+    "UserIdentityType": "string", "UserIdentityArn": "string", "UserIdentityAccountId": "string",
+    "UserIdentityUserName": "string", "SessionMfaAuthenticated": "bool", "SourceIpAddress": "string",
+    "UserAgent": "string", "AWSRegion": "string", "RecipientAccountId": "string",
+    "RequestParameters": "string", "ResponseElements": "string", "ErrorCode": "string", "ErrorMessage": "string"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "kql-detections-tools",
+  "private": true,
+  "description": "Validation for the detection rules in this repo",
+  "scripts": { "validate": "node validate.js" },
+  "dependencies": {
+    "@kusto/language-service-next": "12.4.1",
+    "js-yaml": "^4.1.0"
+  }
+}

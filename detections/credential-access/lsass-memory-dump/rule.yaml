@@ -1,0 +1,62 @@
+id: d4b56bd0-d823-4d16-a064-57f6faf5b455
+name: LSASS memory dump via LOLBins or common dumping tools
+description: |
+  A process command line dumps the memory of lsass.exe: comsvcs.dll MiniDump via rundll32, ProcDump with
+  -ma, createdump, or common tools such as Out-Minidump and Mimikatz commands. Dumping LSASS gives an
+  attacker every credential and token cached on the host.
+severity: High
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - DeviceProcessEvents
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+relevantTechniques:
+  - T1003.001
+query: |
+  DeviceProcessEvents
+  | where Timestamp > ago(1h)
+  | extend Cmd = tolower(ProcessCommandLine)
+  | extend Technique = case(
+      // rundll32 comsvcs.dll, MiniDump <pid> <file> full   (ordinal #24 is MiniDump)
+      (FileName =~ "rundll32.exe" or ProcessVersionInfoOriginalFileName =~ "RUNDLL32.EXE")
+          and Cmd has "comsvcs" and (Cmd has "minidump" or Cmd has "#24"), "comsvcs MiniDump",
+      // ProcDump renamed or not: rely on original file name
+      (ProcessVersionInfoOriginalFileName in~ ("procdump", "procdump.exe", "procdump64.exe") or FileName in~ ("procdump.exe", "procdump64.exe"))
+          and Cmd has "lsass", "ProcDump",
+      // .NET createdump.exe
+      FileName =~ "createdump.exe" and Cmd has_any (" -f ", " --full", " -u "), "createdump",
+      // PowerShell / offensive tooling keywords
+      Cmd has_any ("sekurlsa::", "lsadump::", "out-minidump", "minidumpwritedump", "nanodump", "invoke-mimikatz"), "Credential tooling keywords",
+      // Task Manager / generic dumpers targeting lsass by name
+      Cmd has "lsass" and Cmd has_any (" -ma ", " /ma ", ".dmp"), "Generic LSASS dump",
+      "")
+  | where isnotempty(Technique)
+  | project Timestamp, DeviceName, DeviceId, AccountDomain, AccountName, Technique, FileName, FolderPath,
+            ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine,
+            InitiatingProcessParentFileName, SHA256, ReportId
+entityMappings:
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: DeviceName
+  - entityType: Account
+    fieldMappings:
+      - identifier: Name
+        columnName: AccountName
+      - identifier: NTDomain
+        columnName: AccountDomain
+  - entityType: Process
+    fieldMappings:
+      - identifier: CommandLine
+        columnName: ProcessCommandLine
+customDetails:
+  Technique: Technique
+alertDetailsOverride:
+  alertDisplayNameFormat: "LSASS dump ({{Technique}}) on {{DeviceName}} by {{AccountName}}"
+version: 1.0.0
+kind: Scheduled

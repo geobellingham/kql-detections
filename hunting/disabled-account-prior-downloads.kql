@@ -1,0 +1,33 @@
+// Hunt: accounts disabled in the last 30 days that downloaded unusually many files
+// in the 14 days before they were disabled.
+// Retrospective companion to detections/exfiltration/leaver-bulk-download for tenants
+// without a Leavers watchlist. ATT&CK: T1530, T1213.
+let lookback = 30d;
+let preDisableWindow = 14d;
+let minFiles = 100;
+let disabled = AuditLogs
+    | where TimeGenerated > ago(lookback)
+    | where OperationName == "Disable account" and Result == "success"
+    | mv-expand Target = TargetResources
+    | extend UserPrincipalName = tolower(tostring(Target.userPrincipalName))
+    | where isnotempty(UserPrincipalName)
+    | summarize DisabledAt = min(TimeGenerated),
+                DisabledBy = take_any(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))
+                by UserPrincipalName;
+OfficeActivity
+| where TimeGenerated > ago(lookback + preDisableWindow)
+| where OfficeWorkload in ("SharePoint", "OneDrive")
+| where Operation in ("FileDownloaded", "FileSyncDownloadedFull", "FileSyncDownloadedPartial")
+| extend UserPrincipalName = tolower(UserId)
+| join kind=inner disabled on UserPrincipalName
+| where TimeGenerated between ((DisabledAt - preDisableWindow) .. DisabledAt)
+| summarize FilesDownloaded = count(),
+            DistinctSites = dcount(Site_Url),
+            ActiveDays = dcount(bin(TimeGenerated, 1d)),
+            FirstDownload = min(TimeGenerated),
+            LastDownload = max(TimeGenerated),
+            SampleFiles = make_set(SourceFileName, 25),
+            ClientIPs = make_set(ClientIP, 10)
+            by UserPrincipalName, DisabledAt, DisabledBy
+| where FilesDownloaded >= minFiles
+| sort by FilesDownloaded desc

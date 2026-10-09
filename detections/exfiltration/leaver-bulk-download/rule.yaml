@@ -1,0 +1,72 @@
+id: ebfdcce1-6eca-443e-b21c-076e9d71fc9e
+name: Leaver bulk download from SharePoint/OneDrive
+description: |
+  A user who is on the leavers watchlist (resigned / notice period) downloads or syncs far more files
+  from SharePoint or OneDrive in the last day than their own 30-day baseline. Leavers taking data on the
+  way out usually do it in the days before their account is disabled, so this fires while there is
+  still time to act.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: Office365
+    dataTypes:
+      - OfficeActivity
+queryFrequency: 1d
+queryPeriod: 31d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Exfiltration
+  - Collection
+relevantTechniques:
+  - T1530
+  - T1213
+query: |
+  // Tunables
+  let baselineDays = 30d;
+  let minFiles = 50;            // ignore small days entirely
+  let spikeFactor = 3.0;        // today must be > 3x the user's average daily volume
+  let downloadOps = dynamic(["FileDownloaded", "FileSyncDownloadedFull", "FileSyncDownloadedPartial"]);
+  // Watchlist 'Leavers' columns: UserPrincipalName, LeaveDate (fed from HR or the IAM offboarding queue)
+  let leavers = _GetWatchlist('Leavers')
+      | project UserPrincipalName = tolower(tostring(UserPrincipalName)), LeaveDate = todatetime(LeaveDate)
+      | where LeaveDate > ago(1d);  // still employed, or left today
+  let downloads = OfficeActivity
+      | where TimeGenerated > ago(baselineDays + 1d)
+      | where OfficeWorkload in ("SharePoint", "OneDrive") and Operation in (downloadOps)
+      | extend UserPrincipalName = tolower(UserId)
+      | join kind=inner leavers on UserPrincipalName;
+  let baseline = downloads
+      | where TimeGenerated < ago(1d)
+      | summarize DailyFiles = count() by UserPrincipalName, Day = bin(TimeGenerated, 1d)
+      | summarize BaselineAvg = avg(DailyFiles), BaselineMax = max(DailyFiles), ActiveDays = count() by UserPrincipalName;
+  downloads
+  | where TimeGenerated >= ago(1d)
+  | summarize
+      FilesDownloaded = count(),
+      DistinctSites = dcount(Site_Url),
+      FileTypes = make_set(SourceFileExtension, 15),
+      SampleFiles = make_set(SourceFileName, 20),
+      ClientIPs = make_set(ClientIP, 10),
+      FirstDownload = min(TimeGenerated),
+      LastDownload = max(TimeGenerated)
+      by UserPrincipalName, LeaveDate
+  | join kind=leftouter baseline on UserPrincipalName
+  | extend BaselineAvg = coalesce(BaselineAvg, 0.0), BaselineMax = coalesce(BaselineMax, 0), ActiveDays = coalesce(ActiveDays, 0)
+  | where FilesDownloaded >= minFiles and FilesDownloaded > spikeFactor * BaselineAvg
+  | extend DaysUntilLeave = datetime_diff('day', LeaveDate, now()),
+           SpikeRatio = iff(BaselineAvg > 0, round(FilesDownloaded / BaselineAvg, 1), real(null))
+  | project UserPrincipalName, LeaveDate, DaysUntilLeave, FilesDownloaded, BaselineAvg = round(BaselineAvg, 1),
+            BaselineMax, SpikeRatio, ActiveDays, DistinctSites, FileTypes, SampleFiles, ClientIPs, FirstDownload, LastDownload
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  FilesDownloaded: FilesDownloaded
+  BaselineAvg: BaselineAvg
+  DaysUntilLeave: DaysUntilLeave
+alertDetailsOverride:
+  alertDisplayNameFormat: "Leaver {{UserPrincipalName}} downloaded {{FilesDownloaded}} files ({{DaysUntilLeave}} days before leave date)"
+version: 1.0.0
+kind: Scheduled

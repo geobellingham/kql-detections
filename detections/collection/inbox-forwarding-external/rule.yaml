@@ -1,0 +1,65 @@
+id: 8577d91d-52eb-416a-b8d5-90512a76658e
+name: Mailbox forwarding or inbox rule to an external address
+description: |
+  A user creates or changes an inbox rule or mailbox setting that forwards or redirects mail to an
+  address outside the organisation's domains. This is one of the first things attackers do after taking
+  over a mailbox (to watch invoice threads for BEC), and also how leavers quietly keep a copy of their mail.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: Office365
+    dataTypes:
+      - OfficeActivity
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Collection
+  - Exfiltration
+relevantTechniques:
+  - T1114.003
+  - T1020
+query: |
+  // Your accepted domains. Anything not ending in one of these counts as external.
+  let internalDomains = dynamic(["contoso.com", "contoso.onmicrosoft.com"]);
+  let forwardParams = dynamic(["ForwardTo", "ForwardAsAttachmentTo", "RedirectTo", "ForwardingSmtpAddress", "ForwardingAddress"]);
+  OfficeActivity
+  | where TimeGenerated > ago(1h)
+  | where OfficeWorkload == "Exchange"
+  | where Operation in~ ("New-InboxRule", "Set-InboxRule", "Set-Mailbox", "UpdateInboxRules")
+  | where ResultStatus in~ ("True", "Succeeded", "")
+  | extend ParamList = todynamic(Parameters)
+  | mv-apply P = ParamList on (summarize RuleName = take_anyif(tostring(P.Value), tostring(P.Name) == "Name"))
+  | mv-expand Param = ParamList
+  | extend ParamName = tostring(Param.Name), ParamValue = tostring(Param.Value)
+  | where ParamName in~ (forwardParams) and isnotempty(ParamValue)
+  | extend Recipients = split(replace_string(ParamValue, "smtp:", ""), ";")
+  | mv-expand Recipient = Recipients to typeof(string)
+  | extend Recipient = tolower(trim(@"[\s\[\]""]+", Recipient))
+  | extend RecipientDomain = tostring(split(Recipient, "@")[1])
+  | where isnotempty(RecipientDomain)
+  | where not(RecipientDomain in (internalDomains))
+  | summarize Recipients = make_set(Recipient, 20),
+              Operations = make_set(Operation, 5),
+              ForwardTypes = make_set(ParamName, 5),
+              RuleNames = make_set(RuleName, 5),
+              ClientIPs = make_set(ClientIP, 5),
+              FirstSeen = min(TimeGenerated)
+              by UserId, RecipientDomain
+  | extend MailboxUser = UserId
+  | project FirstSeen, MailboxUser, RecipientDomain, Recipients, ForwardTypes, Operations, RuleNames, ClientIPs
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: MailboxUser
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: RecipientDomain
+customDetails:
+  RecipientDomain: RecipientDomain
+alertDetailsOverride:
+  alertDisplayNameFormat: "{{MailboxUser}} set mail forwarding to external domain {{RecipientDomain}}"
+version: 1.0.0
+kind: Scheduled

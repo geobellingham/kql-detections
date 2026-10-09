@@ -1,0 +1,80 @@
+id: 823e5821-5bf1-450d-8ba5-8d629c1fdca0
+name: AWS security logging disabled or tampered with (CloudTrail, GuardDuty, Config)
+description: |
+  Someone stops or deletes a CloudTrail trail, changes what it records, disables GuardDuty or suppresses
+  its findings, or stops AWS Config recording. Turning off the cameras is a standard step before (or
+  right after) an attacker does the real damage in an AWS account.
+severity: High
+requiredDataConnectors:
+  - connectorId: AWS
+    dataTypes:
+      - AWSCloudTrail
+  - connectorId: AwsS3
+    dataTypes:
+      - AWSCloudTrail
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - DefenseEvasion
+relevantTechniques:
+  - T1562.008
+query: |
+  let tamperEvents = datatable(EventSource: string, EventName: string, Impact: string)[
+      "cloudtrail.amazonaws.com", "StopLogging", "High",
+      "cloudtrail.amazonaws.com", "DeleteTrail", "High",
+      "cloudtrail.amazonaws.com", "UpdateTrail", "Medium",
+      "cloudtrail.amazonaws.com", "PutEventSelectors", "Medium",
+      "cloudtrail.amazonaws.com", "DeleteEventDataStore", "High",
+      "guardduty.amazonaws.com", "DeleteDetector", "High",
+      "guardduty.amazonaws.com", "UpdateDetector", "Medium",
+      "guardduty.amazonaws.com", "DisassociateFromAdministratorAccount", "High",
+      "guardduty.amazonaws.com", "DisassociateFromMasterAccount", "High",
+      "guardduty.amazonaws.com", "CreateFilter", "Medium",
+      "guardduty.amazonaws.com", "DeletePublishingDestination", "Medium",
+      "config.amazonaws.com", "StopConfigurationRecorder", "High",
+      "config.amazonaws.com", "DeleteConfigurationRecorder", "High",
+      "config.amazonaws.com", "DeleteDeliveryChannel", "High"
+  ];
+  AWSCloudTrail
+  | where TimeGenerated > ago(1h)
+  | where EventSource in ("cloudtrail.amazonaws.com", "guardduty.amazonaws.com", "config.amazonaws.com")
+  | join kind=inner tamperEvents on EventSource, EventName
+  | extend Succeeded = isempty(ErrorCode)
+  | extend Req = todynamic(RequestParameters)
+  // UpdateDetector only matters when it disables the detector; CreateFilter only when it auto-archives findings
+  | where not(EventName == "UpdateDetector" and tostring(Req.enable) != "false")
+  | where not(EventName == "CreateFilter" and tostring(Req.action) !~ "ARCHIVE")
+  | extend Target = coalesce(tostring(Req.name), tostring(Req.trailName), tostring(Req.detectorId),
+                             tostring(Req.configurationRecorderName), tostring(Req.deliveryChannelName))
+  | summarize Events = make_set(EventName, 10),
+              Targets = make_set(Target, 10),
+              Regions = make_set(AWSRegion, 10),
+              SucceededCount = countif(Succeeded),
+              FailedCount = countif(not(Succeeded)),
+              ErrorCodes = make_set(ErrorCode, 5),
+              HighImpact = countif(Impact == "High"),
+              FirstSeen = min(TimeGenerated),
+              LastSeen = max(TimeGenerated)
+              by UserIdentityArn, UserIdentityType, SourceIpAddress, UserAgent, RecipientAccountId
+  // Failed attempts are still interesting (probing permissions), but only alert on them as Medium
+  | extend AlertSeverity = case(SucceededCount > 0 and HighImpact > 0, "High", "Medium")
+  | project AlertSeverity, FirstSeen, LastSeen, RecipientAccountId, UserIdentityArn, UserIdentityType,
+            SourceIpAddress, UserAgent, Events, Targets, Regions, SucceededCount, FailedCount, ErrorCodes
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: Name
+        columnName: UserIdentityArn
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SourceIpAddress
+customDetails:
+  AwsAccount: RecipientAccountId
+alertDetailsOverride:
+  alertDisplayNameFormat: "AWS logging tampered with in account {{RecipientAccountId}} by {{UserIdentityArn}}"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

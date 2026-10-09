@@ -1,0 +1,73 @@
+id: 66b0697b-3876-4ee3-97c0-7d8141ca7992
+name: Executable or script downloaded from a domain never seen before (Zscaler)
+description: |
+  A user downloads an executable, installer, script or disk image through Zscaler from a domain nobody in
+  the organisation has visited in the previous 14 days. Malware delivery (phishing links, malvertising, fake
+  updates) almost always comes from new or rarely seen domains.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: Zscaler
+    dataTypes:
+      - CommonSecurityLog
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - Execution
+relevantTechniques:
+  - T1189
+  - T1204.002
+  - T1566.002
+query: |
+  let lookback = 14d;
+  let riskyExtensions = dynamic([".exe", ".dll", ".msi", ".scr", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".hta",
+                                 ".jar", ".iso", ".img", ".vhd", ".lnk", ".one", ".msix", ".appx"]);
+  let riskyFileTypes = dynamic(["exe", "dll", "msi", "windows executables", "powershell", "batch", "hta", "jar", "iso"]);
+  // Software distribution you trust - tune
+  let trustedDomains = dynamic(["microsoft.com", "windowsupdate.com", "adobe.com", "google.com", "zoom.us"]);
+  let web = CommonSecurityLog
+      | where TimeGenerated > ago(lookback)
+      | where DeviceVendor == "Zscaler" and DeviceProduct == "NSSWeb"
+      | extend Domain = tolower(DestinationHostName)
+      | extend RootDomain = strcat_array(array_slice(split(Domain, "."), -2, -1), ".");
+  let knownDomains = web
+      | where TimeGenerated < ago(1h)
+      | distinct Domain;
+  web
+  | where TimeGenerated >= ago(1h)
+  | where DeviceAction in~ ("Allowed", "allow")
+  | where not(RootDomain in (trustedDomains))
+  | extend UrlPath = tolower(tostring(split(RequestURL, "?")[0]))
+  | extend Extension = extract(@"(\.[a-z0-9]{2,5})$", 1, UrlPath)
+  | where Extension in (riskyExtensions) or tolower(FileType) in (riskyFileTypes)
+  | join kind=leftanti knownDomains on Domain
+  | summarize Downloads = count(),
+              Users = make_set(SourceUserName, 10),
+              SampleUrls = make_set(RequestURL, 10),
+              Extensions = make_set(Extension, 10),
+              FileTypes = make_set(FileType, 10),
+              FirstSeen = min(TimeGenerated)
+              by Domain, SourceIP
+  | extend FirstUser = tostring(Users[0]), ExtensionList = strcat_array(Extensions, ", ")
+  | project FirstSeen, Domain, FirstUser, Users, SourceIP, Downloads, ExtensionList, FileTypes, SampleUrls
+entityMappings:
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: Domain
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: FirstUser
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SourceIP
+customDetails:
+  Extensions: ExtensionList
+alertDetailsOverride:
+  alertDisplayNameFormat: "{{FirstUser}} downloaded {{ExtensionList}} from first-seen domain {{Domain}}"
+version: 1.0.0
+kind: Scheduled

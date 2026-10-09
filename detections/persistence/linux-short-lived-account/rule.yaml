@@ -1,0 +1,68 @@
+id: f5922501-1675-4296-8fc4-0b8e7e4b66bb
+name: Short-lived local account on Linux host (created and deleted within 1 hour)
+description: |
+  A local account is created with useradd and deleted with userdel on the same host within an hour.
+  Admins rarely do this. Attackers do: a temporary account for access or privilege escalation, removed
+  afterwards to clean up. The rule also reports whether the account logged in over SSH while it existed.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: Syslog
+    dataTypes:
+      - Syslog
+queryFrequency: 1h
+queryPeriod: 2h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+  - DefenseEvasion
+relevantTechniques:
+  - T1136.001
+  - T1070.009
+query: |
+  let maxLifetime = 60m;
+  // Accounts that legitimately churn (CI runners, test harnesses) - tune per environment
+  let excludedAccounts = dynamic(["ci-runner", "ansible-tmp"]);
+  let created = Syslog
+      | where TimeGenerated > ago(2h)
+      | where ProcessName == "useradd" and SyslogMessage has "new user"
+      | extend AccountName = extract(@"name=([^,\s]+)", 1, SyslogMessage),
+               Uid = toint(extract(@"UID=(\d+)", 1, SyslogMessage))
+      | project CreatedTime = TimeGenerated, Computer, AccountName, Uid, CreateMessage = SyslogMessage;
+  let deleted = Syslog
+      | where TimeGenerated > ago(2h)
+      | where ProcessName == "userdel" and SyslogMessage has "delete user"
+      | extend AccountName = extract(@"delete user '([^']+)'", 1, SyslogMessage)
+      | project DeletedTime = TimeGenerated, Computer, AccountName;
+  let logins = Syslog
+      | where TimeGenerated > ago(2h)
+      | where ProcessName == "sshd" and SyslogMessage startswith "Accepted "
+      | extend AccountName = extract(@"for\s+(\S+)\s+from", 1, SyslogMessage),
+               LoginIP = extract(@"from\s+([0-9a-fA-F:.]+)\s+port", 1, SyslogMessage)
+      | project LoginTime = TimeGenerated, Computer, AccountName, LoginIP;
+  created
+  | where isnotempty(AccountName) and not(AccountName in (excludedAccounts))
+  | join kind=inner deleted on Computer, AccountName
+  | where DeletedTime between (CreatedTime .. (CreatedTime + maxLifetime))
+  | join kind=leftouter logins on Computer, AccountName
+  | summarize LoginsDuringLifetime = countif(LoginTime between (CreatedTime .. DeletedTime)),
+              LoginSources = make_set_if(LoginIP, LoginTime between (CreatedTime .. DeletedTime), 10)
+              by Computer, AccountName, Uid, CreatedTime, DeletedTime, CreateMessage
+  | extend LifetimeMinutes = datetime_diff('minute', DeletedTime, CreatedTime),
+           IsPrivilegedUid = Uid == 0
+  | project CreatedTime, DeletedTime, LifetimeMinutes, Computer, AccountName, Uid, IsPrivilegedUid,
+            LoginsDuringLifetime, LoginSources, CreateMessage
+entityMappings:
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: Computer
+  - entityType: Account
+    fieldMappings:
+      - identifier: Name
+        columnName: AccountName
+customDetails:
+  LifetimeMinutes: LifetimeMinutes
+  LoginsDuringLifetime: LoginsDuringLifetime
+version: 1.0.0
+kind: Scheduled

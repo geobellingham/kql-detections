@@ -1,0 +1,67 @@
+id: 88a09af7-89c1-4c09-9f54-05e286d3d3cd
+name: Encoded PowerShell command that downloads or executes remote code
+description: |
+  PowerShell is started with -EncodedCommand (or any abbreviation of it) and the decoded command contains
+  a download cradle or in-memory execution: Net.WebClient, Invoke-WebRequest, DownloadString, IEX,
+  FromBase64String, BITS. Encoding is a common way to hide a stager from command-line monitoring;
+  decoding it in the query gets back the visibility.
+severity: High
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - DeviceProcessEvents
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Execution
+  - DefenseEvasion
+  - CommandAndControl
+relevantTechniques:
+  - T1059.001
+  - T1027.010
+  - T1105
+query: |
+  let cradleKeywords = dynamic(["downloadstring", "downloadfile", "downloaddata", "net.webclient", "invoke-webrequest",
+                                "iwr ", "invoke-restmethod", "irm ", "start-bitstransfer", "iex", "invoke-expression",
+                                "frombase64string", "reflection.assembly", "-bxor", "memorystream"]);
+  // Known management agents that legitimately use -EncodedCommand - tune per environment
+  let trustedParents = dynamic(["ccmexec.exe", "senseir.exe", "intunemanagementextension.exe"]);
+  DeviceProcessEvents
+  | where Timestamp > ago(1h)
+  | where FileName in~ ("powershell.exe", "pwsh.exe", "powershell_ise.exe")
+       or ProcessVersionInfoOriginalFileName in~ ("PowerShell.EXE", "pwsh.dll")
+  // -e, -ec, -enc, ... -EncodedCommand, with - or / prefix
+  | where ProcessCommandLine matches regex @"(?i)\s[-/]e(c|n|nc|nco|ncod|ncode|ncoded|ncodedc|ncodedco|ncodedcom|ncodedcomm|ncodedcomma|ncodedcomman|ncodedcommand)?\s+[A-Za-z0-9+/=]{20,}"
+  | where not(InitiatingProcessFileName in~ (trustedParents))
+  | extend EncodedBlob = extract(@"(?i)\s[-/]e[a-z]*\s+([A-Za-z0-9+/=]{20,})", 1, ProcessCommandLine)
+  // -EncodedCommand is UTF-16LE: strip the null bytes after decoding
+  | extend Decoded = replace_regex(base64_decode_tostring(EncodedBlob), @"\x00", "")
+  | extend DecodedLower = tolower(Decoded)
+  | where DecodedLower has_any (cradleKeywords)
+  | extend Urls = extract_all(@"(https?://[^\s'""\)]+)", Decoded)
+  | extend FirstUrl = tostring(Urls[0])
+  | project Timestamp, DeviceName, DeviceId, AccountDomain, AccountName, Decoded, Urls, FirstUrl,
+            ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessParentFileName, ReportId
+entityMappings:
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: DeviceName
+  - entityType: Account
+    fieldMappings:
+      - identifier: Name
+        columnName: AccountName
+      - identifier: NTDomain
+        columnName: AccountDomain
+  - entityType: URL
+    fieldMappings:
+      - identifier: Url
+        columnName: FirstUrl
+customDetails:
+  ParentProcess: InitiatingProcessFileName
+alertDetailsOverride:
+  alertDisplayNameFormat: "Encoded PowerShell download cradle on {{DeviceName}} (parent: {{InitiatingProcessFileName}})"
+version: 1.0.0
+kind: Scheduled
