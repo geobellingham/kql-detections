@@ -24,6 +24,16 @@ The rules are generalised from detection problems that come up in day-to-day SOC
 | [AWS logging tampering](detections/defense-evasion/aws-logging-tampering/) | AWSCloudTrail | T1562.008 | Lookup table of tamper calls with impact levels; parameter-aware filtering |
 | [AWS IAM privilege escalation](detections/privilege-escalation/aws-iam-privilege-escalation/) | AWSCloudTrail | T1098.001, T1098.003 | Decodes policy documents; separates "my key" from "a key for someone else" |
 
+**AI threat pack**: detections for attacks on and through AI systems, each with a synthetic test
+
+| Detection | Data source | ATT&CK | What makes it work |
+|---|---|---|---|
+| [LLMjacking on AWS Bedrock](detections/ai-threats/bedrock-llmjacking/) | AWSCloudTrail | T1496, T1580, T1562.008 | Scores the LLMjacking playbook: model enumeration, *checking whether prompts are logged*, failing invoke probes, enabling model access, Bedrock API keys |
+| [Azure OpenAI key theft & guardrail tampering](detections/ai-threats/azure-openai-key-abuse/) | AzureActivity + AzureDiagnostics | T1552, T1562, T1496 | Joins control plane (key reads by new identities, content-filter changes) with data plane (request spike from never-seen /24s) per account |
+| [AI coding agent hijack](detections/ai-threats/ai-coding-agent-hijack/) | DeviceProcessEvents | T1059, T1552.001, T1567 | The *outcome* of prompt injection: Claude Code / Cursor / Copilot / Codex / Gemini CLI running credential-theft or download-and-execute commands |
+| [Copilot prompt injection & AI-assisted recon](detections/ai-threats/copilot-prompt-injection-and-recon/) | CloudAppEvents (CopilotInteraction) + SigninLogs | T1213.002, T1078.004 | Uses Microsoft's XPIA and jailbreak flags from the audit record, plus resource-volume spikes from risky sessions |
+| [Exposed self-hosted LLM servers](detections/ai-threats/exposed-llm-inference-server/) | CommonSecurityLog (FortiGate) | T1190, T1496 | Unauthenticated Ollama / LM Studio / ComfyUI reachable from the internet, or internal hosts using someone else's |
+
 **Hunting queries**
 
 | Query | Purpose |
@@ -37,7 +47,8 @@ detections/<tactic>/<rule-name>/
     rule.yaml     Sentinel scheduled analytic rule (query, schedule, entities, ATT&CK, custom details)
     README.md     ADS write-up: goal, strategy, blind spots, false positives, validation, response
 hunting/          Ad-hoc hunting queries
-tools/            Validator + table schemas
+tests/           Synthetic fixtures per detection + regex unit tests
+tools/            Validator, test renderer, table schemas
 docs/             ADS template for new rules
 ```
 
@@ -48,11 +59,24 @@ Every push runs [`tools/validate.js`](tools/validate.js) in GitHub Actions. It:
 1. checks each `rule.yaml` has the required Sentinel fields, a valid severity and a unique `id`, and that the README write-up exists;
 2. parses **and binds** every query with Microsoft's own KQL parser ([`Kusto.Language`](https://github.com/microsoft/Kusto-Query-Language)) against the table schemas in [`tools/schemas.json`](tools/schemas.json). That catches syntax errors, misspelled columns, and type errors before a rule ever reaches a workspace.
 
-Run it locally:
+3. for every detection with a file in [`tests/fixtures/`](tests/fixtures/): binds the rule against **synthetic tables** (shadowed with `datatable`), which proves the fixture provides every column the rule needs. Each fixture states the expected result in `// EXPECT:` lines.
+
+[`tests/regex_test.py`](tests/regex_test.py) unit-tests the regexes in the rules (credential paths, download-and-execute, inference API paths…) against positive and negative samples.
+
+### Running a detection on synthetic data
+
+```bash
+node tools/render-test.js bedrock-llmjacking
+```
+
+prints a self-contained query (sample rows plus the rule) that runs in any KQL editor with no real data: a free [Azure Data Explorer cluster](https://dataexplorer.azure.com/freecluster), Sentinel Logs, or Defender advanced hunting. Compare the output with the fixture's `EXPECT` lines.
+
+Run all checks locally:
 
 ```bash
 npm ci --prefix tools
 node tools/validate.js
+pip install pyyaml && python3 tests/regex_test.py
 ```
 
 ## Deploying to Sentinel
@@ -66,12 +90,13 @@ Before enabling, set the environment-specific values at the top of each query (d
 
 ## Roadmap
 
+- Execute fixtures in CI against a Kusto emulator (Kustainer) and assert the `EXPECT` row counts
+- Fixtures for the original 13 detections
 - Distributed password spray (grouped by user agent / ASN instead of IP)
 - AiTM session theft: token replay from a new ASN right after MFA
 - LSASS access via `OpenProcessApiCall` (no command line needed)
 - AWS `PassRole`-based escalation paths
 - OAuth illicit consent grants
-- Unit-test style validation: run each query against small synthetic datasets with `datatable`
 
 ## License
 

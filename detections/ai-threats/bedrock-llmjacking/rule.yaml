@@ -1,0 +1,126 @@
+id: f6d64327-168c-4416-b97a-b2b238fd9c0d
+name: LLMjacking - AWS Bedrock recon and model access abuse with stolen credentials
+description: |
+  An AWS identity that doesn't normally use Amazon Bedrock starts enumerating foundation models, checks
+  whether prompt logging is enabled, probes models with invalid calls, enables model access, creates a
+  Bedrock API key, or turns invocation logging off. This is the LLMjacking playbook: stolen cloud keys
+  used to run (or resell) expensive model inference on the victim's bill, and increasingly to power
+  attackers' own AI tooling. Signals are scored and the reasons listed in the alert.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AWS
+    dataTypes:
+      - AWSCloudTrail
+  - connectorId: AwsS3
+    dataTypes:
+      - AWSCloudTrail
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Impact
+  - Discovery
+  - DefenseEvasion
+relevantTechniques:
+  - T1496
+  - T1580
+  - T1562.008
+  - T1078.004
+query: |
+  let lookback       = 1h;
+  let baselineDays   = 13d;
+  let scoreThreshold = 5;
+  let highThreshold  = 8;
+  // Roles/users that legitimately use Bedrock (your AI apps). Their recon/invoke activity is ignored.
+  let approvedIdentities = dynamic(["arn:aws:iam::111111111111:role/genai-app-prod"]);
+  let reconOps  = dynamic(["ListFoundationModels", "GetFoundationModel", "GetFoundationModelAvailability",
+                           "ListFoundationModelAgreementOffers", "GetUseCaseForModelAccess", "ListInferenceProfiles"]);
+  let accessOps = dynamic(["PutUseCaseForModelAccess", "CreateFoundationModelAgreement", "PutFoundationModelEntitlement"]);
+  let invokeOps = dynamic(["InvokeModel", "InvokeModelWithResponseStream", "Converse", "ConverseStream"]);
+  let probeErrors = dynamic(["ValidationException", "AccessDeniedException", "ResourceNotFoundException"]);
+  let trail = AWSCloudTrail
+      | where TimeGenerated > ago(baselineDays + lookback);
+  let recent = trail
+      | where TimeGenerated > ago(lookback)
+      | where EventSource == "bedrock.amazonaws.com"
+           // Bedrock long-term API keys are IAM service-specific credentials
+           or (EventSource == "iam.amazonaws.com" and EventName == "CreateServiceSpecificCredential"
+               and RequestParameters has "bedrock.amazonaws.com")
+      | where not(UserIdentityArn in (approvedIdentities))
+      | extend ModelId = tostring(todynamic(RequestParameters).modelId);
+  let history = trail
+      | where TimeGenerated <= ago(lookback)
+      | where UserIdentityArn in ((recent | distinct UserIdentityArn))
+      | summarize PriorBedrockEvents = countif(EventSource == "bedrock.amazonaws.com"),
+                  KnownIPs = make_set(SourceIpAddress, 500)
+                  by UserIdentityArn;
+  recent
+  | summarize Events = count(),
+              Operations = make_set(EventName, 25),
+              ReconCount = countif(EventName in (reconOps)),
+              LoggingChecked = countif(EventName == "GetModelInvocationLoggingConfiguration"),
+              LoggingDisabled = countif(EventName == "DeleteModelInvocationLoggingConfiguration" and isempty(ErrorCode)),
+              AccessEnabled = countif(EventName in (accessOps) and isempty(ErrorCode)),
+              ApiKeyCreated = countif(EventName == "CreateServiceSpecificCredential" and isempty(ErrorCode)),
+              Invokes = countif(EventName in (invokeOps)),
+              ProbeFailures = countif(EventName in (invokeOps) and ErrorCode in (probeErrors)),
+              ModelsTried = dcountif(ModelId, EventName in (invokeOps) and isnotempty(ModelId)),
+              SampleModels = make_set_if(ModelId, isnotempty(ModelId), 10),
+              SourceIPs = make_set(SourceIpAddress, 10),
+              UserAgents = make_set(UserAgent, 5),
+              Regions = make_set(AWSRegion, 10),
+              AccessKeyIds = make_set(UserIdentityAccessKeyId, 5),
+              FirstSeen = min(TimeGenerated),
+              LastSeen = max(TimeGenerated)
+              by UserIdentityArn, UserIdentityType, RecipientAccountId
+  | join kind=leftouter history on UserIdentityArn
+  | extend KnownIPs = iff(isnull(KnownIPs), dynamic([]), KnownIPs)
+  | extend FirstTimeBedrock = coalesce(PriorBedrockEvents, 0) == 0,
+           NewSourceIP      = array_length(set_difference(SourceIPs, KnownIPs)) > 0,
+           Probing          = ProbeFailures >= 3 or (ProbeFailures > 0 and ModelsTried >= 2),
+           ManyModels       = ModelsTried >= 3,
+           ManyRegions      = array_length(Regions) >= 3,
+           LongTermKey      = UserIdentityType == "IAMUser"
+  | extend Score = 4 * toint(LoggingDisabled > 0) + 3 * toint(AccessEnabled > 0) + 3 * toint(ApiKeyCreated > 0)
+                 + 2 * toint(LoggingChecked > 0) + 2 * toint(Probing) + 2 * toint(FirstTimeBedrock)
+                 + 1 * toint(NewSourceIP) + 1 * toint(ManyModels) + 1 * toint(ReconCount >= 3)
+                 + 1 * toint(ManyRegions) + 1 * toint(LongTermKey)
+  | extend Reasons = strcat_array(array_concat(
+        iff(LoggingDisabled > 0, dynamic(["Invocation logging deleted"]), dynamic([])),
+        iff(AccessEnabled > 0,   dynamic(["Model access enabled / agreement accepted"]), dynamic([])),
+        iff(ApiKeyCreated > 0,   dynamic(["Bedrock API key created"]), dynamic([])),
+        iff(LoggingChecked > 0,  dynamic(["Checked whether prompt logging is on"]), dynamic([])),
+        iff(Probing,             dynamic(["Invoke probes failing across models"]), dynamic([])),
+        iff(FirstTimeBedrock,    dynamic(["Identity never used Bedrock in 13d"]), dynamic([])),
+        iff(NewSourceIP,         dynamic(["New source IP for identity"]), dynamic([])),
+        iff(ManyModels,          dynamic(["3+ different models invoked"]), dynamic([])),
+        iff(ReconCount >= 3,     dynamic(["Model enumeration"]), dynamic([])),
+        iff(ManyRegions,         dynamic(["Activity across 3+ regions"]), dynamic([])),
+        iff(LongTermKey,         dynamic(["Long-term IAM user access key"]), dynamic([]))), " | ")
+  | where Score >= scoreThreshold
+  | extend AlertSeverity = iff(Score >= highThreshold, "High", "Medium"),
+           FirstSourceIP = tostring(SourceIPs[0])
+  | project AlertSeverity, Score, Reasons, FirstSeen, LastSeen, RecipientAccountId, UserIdentityArn, UserIdentityType,
+            AccessKeyIds, SourceIPs, FirstSourceIP, Regions, Operations, Invokes, ProbeFailures, ModelsTried, SampleModels,
+            UserAgents, PriorBedrockEvents
+  | order by Score desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: Name
+        columnName: UserIdentityArn
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: FirstSourceIP
+customDetails:
+  Score: Score
+  Reasons: Reasons
+  AwsAccount: RecipientAccountId
+alertDetailsOverride:
+  alertDisplayNameFormat: "Possible LLMjacking in AWS account {{RecipientAccountId}} by {{UserIdentityArn}} (score {{Score}})"
+  alertDescriptionFormat: "Reasons: {{Reasons}}"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

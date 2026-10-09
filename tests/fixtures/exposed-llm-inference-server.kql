@@ -1,0 +1,22 @@
+// Test fixture: exposed-llm-inference-server
+// EXPECT: exactly 2 rows
+//   InternalHost 10.0.5.20 | Inbound: exposed inference server | High   | ExternalSources 2 | Paths [/api/generate, /api/tags]
+//   InternalHost 10.0.8.15 | Outbound: internal host using an external inference server | Medium | ExternalHost 103.77.1.9
+// MUST NOT appear:
+//   - denied inbound to 10.0.5.30:11434
+//   - outbound HTTPS to a SaaS LLM API path (normal use)
+//   - inbound to an ordinary web API path
+//   - non-Fortinet log rows
+let CommonSecurityLog = datatable(Offset: timespan, DeviceVendor: string, DeviceAction: string, SourceIP: string,
+                                  DestinationIP: string, DestinationPort: int, RequestURL: string, ReceivedBytes: long)
+[
+    -50m, "Fortinet", "accept", "45.155.205.10", "10.0.5.20", 11434, "",                                     500,
+    -45m, "Fortinet", "accept", "45.155.205.10", "10.0.5.20", 11434, "/api/generate",                        250000,
+    -40m, "Fortinet", "close",  "194.0.0.5",     "10.0.5.20", 11434, "/api/tags",                            1200,
+    -35m, "Fortinet", "deny",   "45.1.1.1",      "10.0.5.30", 11434, "",                                     0,
+    -30m, "Fortinet", "accept", "10.0.8.15",     "103.77.1.9", 11434, "",                                    8000,
+    -25m, "Fortinet", "accept", "10.0.8.16",     "104.18.1.1", 443,  "https://api.openai.com/v1/chat/completions", 30000,
+    -20m, "Fortinet", "accept", "8.8.4.4",       "10.0.5.40", 443,   "/api/users?id=1",                      900,
+    -15m, "Palo Alto Networks", "allow", "45.155.205.11", "10.0.5.21", 11434, "/api/generate",               5000
+]
+| extend TimeGenerated = now() + Offset;

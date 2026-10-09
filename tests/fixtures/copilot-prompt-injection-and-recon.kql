@@ -1,0 +1,44 @@
+// Test fixture: copilot-prompt-injection-and-recon
+// EXPECT: exactly 2 rows
+//   u-victim : AlertSeverity High,   Score 11 (risky sign-in 3, resource spike 2, sensitive hunt 2, new country 2, anon proxy 2)
+//   u-xpia   : AlertSeverity Medium, Score 3  (Copilot used a resource flagged for prompt injection)
+// MUST NOT appear:
+//   - u-normal : usual volume, usual country
+//   - u-curious: a jailbreak attempt alone (2 points, under the threshold of 3)
+let bulkResources = toscalar(
+    range j from 1 to 37 step 1
+    | extend r = bag_pack("Name", strcat("Project doc ", j, ".docx"), "Type", "docx",
+                          "SiteUrl", "https://contoso.sharepoint.com/sites/eng", "Action", "Read", "Status", "success")
+    | summarize make_list(r));
+let victimResources = array_concat(bulkResources, dynamic([
+    {"Name": "VPN setup guide.docx", "Type": "docx", "SiteUrl": "https://contoso.sharepoint.com/sites/it", "Action": "Read"},
+    {"Name": "Payroll_2026.xlsx", "Type": "xlsx", "SiteUrl": "https://contoso.sharepoint.com/sites/hr", "Action": "Read", "SensitivityLabelId": "lbl-confidential"},
+    {"Name": "service passwords.txt", "Type": "txt", "SiteUrl": "https://contoso.sharepoint.com/sites/it", "Action": "Read"}]));
+let normalResources = dynamic([
+    {"Name": "Q3 roadmap.pptx", "Type": "pptx", "SiteUrl": "https://contoso.sharepoint.com/sites/eng", "Action": "Read"},
+    {"Name": "Meeting notes.docx", "Type": "docx", "SiteUrl": "https://contoso.sharepoint.com/sites/eng", "Action": "Read"}]);
+let xpiaResources = dynamic([
+    {"Name": "Supplier onboarding.docx", "Type": "docx", "SiteUrl": "https://contoso.sharepoint.com/sites/procurement", "Action": "Read", "XPIADetected": true}]);
+let messages = dynamic([{"ID": "1", "isPrompt": true}, {"ID": "2", "isPrompt": false}]);
+let jailbreakMessages = dynamic([{"ID": "1", "isPrompt": true, "JailbreakDetected": true}, {"ID": "2", "isPrompt": false}]);
+let ev = (offset: timespan, user: string, name: string, ip: string, country: string, anon: bool, res: dynamic, msgs: dynamic) {
+    print TimeGenerated = now() + offset, ActionType = "CopilotInteraction", AccountObjectId = user, AccountDisplayName = name,
+          IPAddress = ip, CountryCode = country, IsAnonymousProxy = anon,
+          RawEventData = bag_pack("CopilotEventData", bag_pack("AppHost", "BizChat", "AccessedResources", res, "Messages", msgs))
+};
+let CloudAppEvents = union
+    ev(-3d,  "u-victim",  "Victim User",  "198.51.100.30", "SE", false, normalResources, messages),
+    ev(-2d,  "u-victim",  "Victim User",  "198.51.100.30", "SE", false, normalResources, messages),
+    ev(-20m, "u-victim",  "Victim User",  "185.220.101.44", "NG", true,  victimResources, messages),
+    ev(-4d,  "u-xpia",    "Xpia User",    "198.51.100.31", "SE", false, normalResources, messages),
+    ev(-15m, "u-xpia",    "Xpia User",    "198.51.100.31", "SE", false, xpiaResources,  messages),
+    ev(-5d,  "u-normal",  "Normal User",  "198.51.100.32", "SE", false, normalResources, messages),
+    ev(-10m, "u-normal",  "Normal User",  "198.51.100.32", "SE", false, normalResources, messages),
+    ev(-6d,  "u-curious", "Curious User", "198.51.100.33", "SE", false, normalResources, messages),
+    ev(-5m,  "u-curious", "Curious User", "198.51.100.33", "SE", false, normalResources, jailbreakMessages);
+let SigninLogs = datatable(Offset: timespan, UserId: string, RiskLevelDuringSignIn: string, IPAddress: string)
+[
+    -25m, "u-victim", "high", "185.220.101.44",
+    -30m, "u-normal", "none", "198.51.100.32"
+]
+| extend TimeGenerated = now() + Offset;

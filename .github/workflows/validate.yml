@@ -15,4 +15,11 @@ jobs:
           cache: npm
           cache-dependency-path: tools/package-lock.json
       - run: npm ci --prefix tools
-      - run: node tools/validate.js
+      - name: Parse and bind every query (rules, hunting, test fixtures)
+        run: node tools/validate.js
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - name: Regex unit tests
+        run: python3 tests/regex_test.py

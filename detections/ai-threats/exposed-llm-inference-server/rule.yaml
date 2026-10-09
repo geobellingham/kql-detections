@@ -1,0 +1,92 @@
+id: 23d37a44-fb3a-4731-b76a-30696307e6a0
+name: Self-hosted LLM inference server exposed to the internet, or internal hosts using someone else's
+description: |
+  Internet sources reach an internal host on a self-hosted LLM inference port (Ollama 11434, LM Studio 1234,
+  Gradio / text-generation-webui 7860, ComfyUI 8188) or on an inference API path (/api/generate, /api/chat,
+  /api/tags, /v1/chat/completions ...), and the firewall allowed it. Ollama and similar servers ship without
+  authentication, so an exposed one is free compute for attackers (LLMjacking) and a way to pull or poison
+  models. The outbound branch catches internal hosts using an *external* unauthenticated inference server,
+  which is either shadow AI or tooling using stolen compute.
+severity: High
+requiredDataConnectors:
+  - connectorId: Fortinet
+    dataTypes:
+      - CommonSecurityLog
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - Impact
+  - CommandAndControl
+relevantTechniques:
+  - T1190
+  - T1496
+  - T1071.001
+query: |
+  let inferencePorts = dynamic([11434, 1234, 7860, 8188]);   // Ollama, LM Studio, Gradio/TGWUI, ComfyUI
+  let inferencePathPattern = @"(/api/(generate|chat|tags|pull|push|create|embed|embeddings|show|ps)\b|/v1/(chat/completions|completions|models|embeddings)\b)";
+  // Your public ranges, in case the firewall logs the pre-NAT (VIP) destination
+  let ownedPublicRanges = dynamic([]);
+  // Hosts that intentionally serve inference behind auth / an allow-list
+  let approvedInferenceHosts = dynamic([]);
+  let fw = CommonSecurityLog
+      | where TimeGenerated > ago(1h)
+      | where DeviceVendor == "Fortinet"
+      | where DeviceAction !in~ ("deny", "drop", "block", "blocked")
+      | where isnotempty(SourceIP) and isnotempty(DestinationIP)
+      | extend Path = tolower(tostring(split(RequestURL, "?")[0]))
+      | extend IsInferencePort = DestinationPort in (inferencePorts),
+               IsInferencePath = Path matches regex inferencePathPattern
+      | where IsInferencePort or IsInferencePath;
+  let inbound = fw
+      | where not(ipv4_is_private(SourceIP))
+      | where ipv4_is_private(DestinationIP) or ipv4_is_in_any_range(DestinationIP, ownedPublicRanges)
+      | where not(DestinationIP in (approvedInferenceHosts))
+      | summarize Sessions = count(),
+                  ExternalSources = dcount(SourceIP),
+                  SampleSources = make_set(SourceIP, 10),
+                  Ports = make_set(DestinationPort, 5),
+                  Paths = make_set_if(Path, IsInferencePath, 10),
+                  BytesReturned = sum(ReceivedBytes),
+                  FirstSeen = min(TimeGenerated),
+                  LastSeen = max(TimeGenerated)
+                  by InternalHost = DestinationIP
+      | extend Direction = "Inbound: exposed inference server",
+               AlertSeverity = iff(array_length(Paths) > 0 or BytesReturned > 100000, "High", "Medium"),
+               ExternalHost = tostring(SampleSources[0]);
+  let outbound = fw
+      | where ipv4_is_private(SourceIP) and not(ipv4_is_private(DestinationIP))
+      | where IsInferencePort    // port-based only: inference *paths* to the internet are normal SaaS API use
+      | summarize Sessions = count(),
+                  ExternalSources = dcount(DestinationIP),
+                  SampleSources = make_set(DestinationIP, 10),
+                  Ports = make_set(DestinationPort, 5),
+                  Paths = make_set_if(Path, IsInferencePath, 10),
+                  BytesReturned = sum(ReceivedBytes),
+                  FirstSeen = min(TimeGenerated),
+                  LastSeen = max(TimeGenerated)
+                  by InternalHost = SourceIP
+      | extend Direction = "Outbound: internal host using an external inference server",
+               AlertSeverity = "Medium",
+               ExternalHost = tostring(SampleSources[0]);
+  union inbound, outbound
+  | project AlertSeverity, Direction, InternalHost, ExternalHost, ExternalSources, SampleSources, Ports, Paths,
+            Sessions, BytesReturned, FirstSeen, LastSeen
+entityMappings:
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: InternalHost
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: ExternalHost
+customDetails:
+  Direction: Direction
+alertDetailsOverride:
+  alertDisplayNameFormat: "{{Direction}} ({{InternalHost}})"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

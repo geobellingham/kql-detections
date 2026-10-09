@@ -88,5 +88,23 @@ if (fs.existsSync(huntDir))
   for (const file of walk(huntDir).filter(f => f.endsWith(".kql")))
     report(file, checkKql(fs.readFileSync(file, "utf8")));
 
+// Test fixtures: tests/fixtures/<rule-folder>.kql shadows the tables with synthetic rows.
+// Fixture + rule query must parse and bind, which proves the fixture provides every column the rule uses.
+const fixDir = path.join(root, "tests", "fixtures");
+if (fs.existsSync(fixDir)) {
+  const ruleDirs = new Map(walk(path.join(root, "detections")).filter(f => f.endsWith("rule.yaml"))
+    .map(f => [path.basename(path.dirname(f)), f]));
+  for (const file of walk(fixDir).filter(f => f.endsWith(".kql"))) {
+    const name = path.basename(file, ".kql");
+    const rulePath = ruleDirs.get(name);
+    if (!rulePath) { report(file, [`no detection folder named ${name}`]); continue; }
+    const rule = yaml.load(fs.readFileSync(rulePath, "utf8"));
+    const fixture = fs.readFileSync(file, "utf8");
+    if (!/EXPECT:/.test(fixture)) { report(file, ["fixture has no // EXPECT: line"]); continue; }
+    const errs = checkKql(fixture + "\n" + rule.query);
+    report(file, errs);
+  }
+}
+
 console.log(`\n${checked - failures}/${checked} passed`);
 process.exit(failures ? 1 : 0);

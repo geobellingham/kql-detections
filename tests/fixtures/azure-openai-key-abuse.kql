@@ -1,0 +1,32 @@
+// Test fixture: azure-openai-key-abuse
+// EXPECT: exactly 1 row
+//   AccountName = aoai-prod, AlertSeverity = High, Score = 11
+//   Reasons: Content filter / blocklist changed or deleted | Keys read by an identity not seen before |
+//            Request spike vs busiest baseline hour | Requests from never-seen IP ranges | Many 4xx from new ranges
+// MUST NOT appear:
+//   - aoai-dev: steady traffic from its usual range, keys read only by the known pipeline
+let prodId = "/SUBSCRIPTIONS/0000/RESOURCEGROUPS/RG-AI/PROVIDERS/MICROSOFT.COGNITIVESERVICES/ACCOUNTS/AOAI-PROD";
+let devId  = "/SUBSCRIPTIONS/0000/RESOURCEGROUPS/RG-AI/PROVIDERS/MICROSOFT.COGNITIVESERVICES/ACCOUNTS/AOAI-DEV";
+let AzureActivity = datatable(Offset: timespan, OperationNameValue: string, ActivityStatusValue: string,
+                              _ResourceId: string, Caller: string, CallerIpAddress: string)
+[
+    -5d,  "MICROSOFT.COGNITIVESERVICES/ACCOUNTS/LISTKEYS/ACTION",   "Success", "/SUBSCRIPTIONS/0000/RESOURCEGROUPS/RG-AI/PROVIDERS/MICROSOFT.COGNITIVESERVICES/ACCOUNTS/AOAI-PROD", "deploy-pipeline@contoso.com", "52.10.20.5",
+    -3h,  "MICROSOFT.COGNITIVESERVICES/ACCOUNTS/LISTKEYS/ACTION",   "Success", "/SUBSCRIPTIONS/0000/RESOURCEGROUPS/RG-AI/PROVIDERS/MICROSOFT.COGNITIVESERVICES/ACCOUNTS/AOAI-PROD", "mallory@contoso.com",         "185.220.101.7",
+    -20m, "MICROSOFT.COGNITIVESERVICES/ACCOUNTS/RAIPOLICIES/WRITE", "Success", "/SUBSCRIPTIONS/0000/RESOURCEGROUPS/RG-AI/PROVIDERS/MICROSOFT.COGNITIVESERVICES/ACCOUNTS/AOAI-PROD/RAIPOLICIES/PERMISSIVE", "mallory@contoso.com", "185.220.101.7",
+    -6d,  "MICROSOFT.COGNITIVESERVICES/ACCOUNTS/LISTKEYS/ACTION",   "Success", "/SUBSCRIPTIONS/0000/RESOURCEGROUPS/RG-AI/PROVIDERS/MICROSOFT.COGNITIVESERVICES/ACCOUNTS/AOAI-DEV",  "deploy-pipeline@contoso.com", "52.10.20.5",
+    -2h,  "MICROSOFT.COGNITIVESERVICES/ACCOUNTS/LISTKEYS/ACTION",   "Success", "/SUBSCRIPTIONS/0000/RESOURCEGROUPS/RG-AI/PROVIDERS/MICROSOFT.COGNITIVESERVICES/ACCOUNTS/AOAI-DEV",  "deploy-pipeline@contoso.com", "52.10.20.5"
+]
+| extend TimeGenerated = now() + Offset;
+let AzureDiagnostics = union
+    // aoai-prod baseline: 10 requests/hour over 3 hours, two days ago, from the app's range
+    (range i from 0 to 29 step 1 | extend TimeGenerated = ago(2d) + (i / 10) * 1h + (i % 10) * 1m,
+        _ResourceId = prodId, CallerIPAddress = "52.10.20.***", ResultSignature = "200"),
+    // aoai-prod now: 400 requests in the last hour from a never-seen range, every 7th one a 401
+    (range i from 1 to 400 step 1 | extend TimeGenerated = ago(50m) + i * 5s,
+        _ResourceId = prodId, CallerIPAddress = "185.220.101.***", ResultSignature = iff(i % 7 == 0, "401", "200")),
+    // aoai-dev baseline and now: 20 requests/hour from its usual range
+    (range i from 0 to 59 step 1 | extend TimeGenerated = ago(3d) + (i / 20) * 1h + (i % 20) * 1m,
+        _ResourceId = devId, CallerIPAddress = "52.10.30.***", ResultSignature = "200"),
+    (range i from 1 to 20 step 1 | extend TimeGenerated = ago(40m) + i * 1m,
+        _ResourceId = devId, CallerIPAddress = "52.10.30.***", ResultSignature = "200")
+| extend ResourceProvider = "MICROSOFT.COGNITIVESERVICES", Category = "RequestResponse", OperationName = "ChatCompletions_Create";

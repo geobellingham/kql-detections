@@ -1,0 +1,137 @@
+id: 9abe54cd-7089-49ff-a7f4-f87821e8d999
+name: M365 Copilot - prompt injection content, jailbreaks or Copilot-assisted recon by a risky session
+description: |
+  Scores Microsoft 365 Copilot interactions per user per hour. Fires when Copilot grounded on a resource that
+  Microsoft flagged as containing a cross-prompt injection attack (XPIA), when prompts trip the jailbreak
+  classifier, or when a user whose sign-in is risky, from a new country or behind an anonymising proxy suddenly
+  has Copilot pull far more content than usual, especially files named like credentials, VPN, payroll or banking.
+  Attackers with a stolen session increasingly ask Copilot to find secrets for them instead of browsing manually.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - CloudAppEvents
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Collection
+  - Discovery
+  - InitialAccess
+relevantTechniques:
+  - T1213.002
+  - T1083
+  - T1078.004
+query: |
+  let lookback       = 1h;
+  let baselineDays   = 13d;
+  let minResources   = 30;       // resources pulled in the hour before a "spike" can count
+  let spikeFactor    = 3.0;      // vs the user's busiest baseline hour
+  let scoreThreshold = 3;
+  let highThreshold  = 6;
+  let sensitiveNamePattern = @"(password|passwd|credential|secret|api[ _-]?key|token|vpn|mfa|recovery|payroll|salary|bank|iban|swift|invoice|wire transfer|merger|acquisition|board pack)";
+  // CopilotInteraction audit records arrive in CloudAppEvents via Defender for Cloud Apps;
+  // the audit payload sits in RawEventData.CopilotEventData
+  let copilot = CloudAppEvents
+      | where TimeGenerated > ago(baselineDays + lookback)
+      | where ActionType == "CopilotInteraction"
+      | extend EventData = RawEventData.CopilotEventData
+      | extend Resources = EventData.AccessedResources, Messages = EventData.Messages,
+               AppHost = tostring(EventData.AppHost), IsRecent = TimeGenerated > ago(lookback)
+      | mv-apply R = Resources on (
+          extend RName = tostring(R.Name),
+                 IsXpia = tobool(R.XPIADetected) == true or tobool(R.xpiaDetected) == true,
+                 IsSensitive = tolower(tostring(R.Name)) matches regex sensitiveNamePattern
+          | summarize ResourceCount = count(),
+                    XpiaCount = countif(IsXpia),
+                    SensitiveCount = countif(IsSensitive),
+                    XpiaNames = strcat_array(make_set_if(RName, IsXpia, 10), "; "),
+                    SensitiveNames = strcat_array(make_set_if(RName, IsSensitive, 20), "; "),
+                    LabeledResources = countif(isnotempty(tostring(R.SensitivityLabelId)) or isnotempty(tostring(R.sensitivityLabelId))),
+                    FirstSite = take_any(strcat(tostring(R.SiteUrl), tostring(R.siteUrl))))
+      | mv-apply M = Messages on (
+          summarize Jailbreaks = countif(tobool(M.JailbreakDetected) == true or tobool(M.jailbreakDetected) == true),
+                    Prompts = countif(tobool(M.IsPrompt) == true or tobool(M.isPrompt) == true));
+  let recent = copilot
+      | where IsRecent
+      | summarize Interactions = count(),
+                  ResourcesPulled = sum(ResourceCount),
+                  Prompts = sum(Prompts),
+                  Jailbreaks = sum(Jailbreaks),
+                  XpiaCount = sum(XpiaCount),
+                  SensitiveCount = sum(SensitiveCount),
+                  XpiaResources = make_set_if(XpiaNames, isnotempty(XpiaNames), 10),
+                  SensitiveResources = make_set_if(SensitiveNames, isnotempty(SensitiveNames), 20),
+                  LabeledResources = sum(LabeledResources),
+                  Sites = make_set_if(FirstSite, isnotempty(FirstSite), 10),
+                  AppHosts = make_set(AppHost, 5),
+                  IPs = make_set(IPAddress, 5),
+                  Countries = make_set(CountryCode, 5),
+                  AnonymousProxy = max(toint(IsAnonymousProxy)),
+                  AccountDisplayName = take_any(AccountDisplayName),
+                  FirstSeen = min(TimeGenerated),
+                  LastSeen = max(TimeGenerated)
+                  by AccountObjectId;
+  let baseRows = copilot
+      | where not(IsRecent) and AccountObjectId in ((recent | distinct AccountObjectId));
+  let baseline = baseRows
+      | summarize HourResources = sum(ResourceCount) by AccountObjectId, Hour = bin(TimeGenerated, 1h)
+      | summarize BaselineMaxHour = max(HourResources), ActiveHours = count() by AccountObjectId
+      | join kind=leftouter (baseRows | summarize KnownCountries = make_set(CountryCode, 50) by AccountObjectId) on AccountObjectId;
+  let riskySignins = SigninLogs
+      | where TimeGenerated > ago(lookback + 1h)
+      | where UserId in ((recent | distinct AccountObjectId))
+      | where RiskLevelDuringSignIn in ("medium", "high")
+      | summarize RiskySignIns = count(), RiskyIPs = make_set(IPAddress, 5) by AccountObjectId = UserId;
+  recent
+  | join kind=leftouter baseline     on AccountObjectId
+  | join kind=leftouter riskySignins on AccountObjectId
+  | extend KnownCountries = iff(isnull(KnownCountries), dynamic([]), KnownCountries)
+  | extend XpiaDetected   = XpiaCount > 0,
+           JailbreakSeen  = Jailbreaks > 0,
+           ResourceSpike  = ResourcesPulled >= minResources and ResourcesPulled > spikeFactor * coalesce(BaselineMaxHour, 0),
+           SensitiveHunt  = SensitiveCount >= 3,
+           RiskySession   = coalesce(RiskySignIns, 0) > 0,
+           NewCountry     = array_length(KnownCountries) > 0 and array_length(set_difference(Countries, KnownCountries)) > 0,
+           ViaAnonProxy   = coalesce(AnonymousProxy, 0) > 0
+  | extend Score = 3 * toint(XpiaDetected) + 3 * toint(RiskySession) + 2 * toint(JailbreakSeen)
+                 + 2 * toint(ResourceSpike) + 2 * toint(SensitiveHunt) + 2 * toint(NewCountry) + 2 * toint(ViaAnonProxy)
+  | extend Reasons = strcat_array(array_concat(
+        iff(XpiaDetected,  dynamic(["Copilot used a resource flagged for prompt injection (XPIA)"]), dynamic([])),
+        iff(RiskySession,  dynamic(["Medium/high risk sign-in in the last 2h"]), dynamic([])),
+        iff(JailbreakSeen, dynamic(["Jailbreak attempt detected in prompt"]), dynamic([])),
+        iff(ResourceSpike, dynamic(["Copilot pulled far more content than the user's usual"]), dynamic([])),
+        iff(SensitiveHunt, dynamic(["3+ credential/finance/VPN-like resources accessed"]), dynamic([])),
+        iff(NewCountry,    dynamic(["Copilot used from a new country"]), dynamic([])),
+        iff(ViaAnonProxy,  dynamic(["Anonymous proxy / VPN egress"]), dynamic([]))), " | ")
+  | where Score >= scoreThreshold
+  | extend AlertSeverity = iff(Score >= highThreshold, "High", "Medium"),
+           FirstIP = tostring(IPs[0])
+  | project AlertSeverity, Score, Reasons, FirstSeen, LastSeen, AccountObjectId, AccountDisplayName, Interactions, Prompts,
+            ResourcesPulled, BaselineMaxHour, ActiveHours, XpiaCount, XpiaResources, Jailbreaks, SensitiveCount, SensitiveResources, LabeledResources,
+            Sites, AppHosts, IPs, FirstIP, Countries, RiskySignIns, RiskyIPs
+  | order by Score desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: AadUserId
+        columnName: AccountObjectId
+      - identifier: DisplayName
+        columnName: AccountDisplayName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: FirstIP
+customDetails:
+  Score: Score
+  Reasons: Reasons
+alertDetailsOverride:
+  alertDisplayNameFormat: "Suspicious Copilot activity for {{AccountDisplayName}} (score {{Score}})"
+  alertDescriptionFormat: "Reasons: {{Reasons}}"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

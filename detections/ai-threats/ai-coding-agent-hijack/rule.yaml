@@ -1,0 +1,94 @@
+id: 35bb0716-ea8d-413b-affb-52c5bae90192
+name: AI coding agent runs credential theft or download-and-execute commands (likely prompt injection)
+description: |
+  A shell command started by an AI coding agent or AI-enabled IDE (Claude Code, Cursor, Windsurf, VS Code /
+  Copilot agent, Codex CLI, Gemini CLI, Aider, Goose, Cline) reads credential files and sends or encodes them,
+  pipes a download straight into a shell, or talks to a known exfiltration endpoint. Agents follow instructions
+  hidden in repos, web pages, issues and MCP tool descriptions; this is what a successful indirect prompt
+  injection looks like on the developer's machine.
+severity: High
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - DeviceProcessEvents
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Execution
+  - CredentialAccess
+  - Exfiltration
+relevantTechniques:
+  - T1059
+  - T1552.001
+  - T1105
+  - T1567
+query: |
+  // Process names of agent CLIs / AI IDEs (lower-case). VS Code is included because Copilot agent mode and
+  // extensions like Cline run commands through it.
+  let agentProcesses = dynamic(["claude", "claude.exe", "cursor", "cursor.exe", "cursor helper", "cursor helper (plugin)",
+                                "windsurf", "windsurf.exe", "code", "code.exe", "code helper", "code helper (plugin)",
+                                "codex", "codex.exe", "gemini", "aider", "goose", "goose.exe"]);
+  let vscodeProcesses = dynamic(["code", "code.exe", "code helper", "code helper (plugin)"]);
+  // Agents installed via npm/pip run as node/python: recognise them from the command line
+  let agentCmdMarkers = dynamic(["@anthropic-ai/claude-code", "claude-code", "@openai/codex", "@google/gemini-cli",
+                                 "@github/copilot", "cursor-agent", "aider-chat", "goose"]);
+  // Installers agents are commonly asked to run - excluded from the download-and-execute branch
+  let allowedInstallDomains = dynamic(["sh.rustup.rs", "get.docker.com", "bun.sh", "deno.land", "astral.sh",
+                                       "raw.githubusercontent.com/homebrew", "install.python-poetry.org", "get.pnpm.io"]);
+  let credPattern  = @"(\.aws[/\\](credentials|config)|\.ssh[/\\]id_|\.kube[/\\]config|\.docker[/\\]config\.json|\.npmrc|\.pypirc|\.git-credentials|\.netrc|application_default_credentials\.json|\.azure[/\\](accesstokens\.json|msal_token_cache)|gh[/\\]hosts\.yml|(^|[\s/\\'""=])\.env(\.[a-z0-9]+)?($|[\s'"";|&])|find-(generic|internet)-password|\bprintenv\b|(^|[\s;|&(])env\s*\||get-childitem\s+env:)";
+  let netPattern   = @"(\b(curl|wget|ncat|socat|scp|invoke-webrequest|iwr|invoke-restmethod|irm)\b|(^|[\s;|&])nc\s|/dev/tcp/|\bpython[0-9.]*\s+-c\b.*\b(requests|urllib|socket)\b)";
+  let encodePattern = @"\b(base64|xxd|openssl\s+(enc|base64))\b";
+  let downloadExecPattern = @"((curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b|(curl|wget)\b[^|;&]*\|\s*(python[0-9.]*|perl|ruby|node)\b|iex\s*\(?\s*(iwr|irm|invoke-webrequest|invoke-restmethod|\(?new-object\s+(system\.)?net\.webclient)|(iwr|irm|invoke-webrequest|invoke-restmethod)\b[^|]*\|\s*iex\b)";
+  let exfilDestPattern = @"(webhook\.site|pipedream\.net|requestbin|ngrok(-free)?\.(io|app|dev)|interact\.sh|\.oast\.(fun|live|site|online|me|pro)|burpcollaborator\.net|pastebin\.com|transfer\.sh|discord(app)?\.com/api/webhooks|api\.telegram\.org)";
+  DeviceProcessEvents
+  | where Timestamp > ago(1h)
+  | extend Parent = tolower(InitiatingProcessFileName),
+           GrandParent = tolower(InitiatingProcessParentFileName),
+           ParentCmd = tolower(InitiatingProcessCommandLine)
+  | where Parent in (agentProcesses) or GrandParent in (agentProcesses) or ParentCmd has_any (agentCmdMarkers)
+  | extend Cmd = tolower(ProcessCommandLine)
+  | extend CredAccess   = Cmd matches regex credPattern,
+           Network      = Cmd matches regex netPattern,
+           Encoding     = Cmd matches regex encodePattern,
+           ExfilDest    = Cmd matches regex exfilDestPattern,
+           DownloadExec = Cmd matches regex downloadExecPattern and not(Cmd has_any (allowedInstallDomains))
+  | extend Technique = case(
+      CredAccess and (Network or ExfilDest), "Credential file read + network send",
+      ExfilDest and Network,                 "Traffic to known exfiltration / callback service",
+      DownloadExec,                          "Download piped into interpreter",
+      CredAccess and Encoding,               "Credential file read + encoding",
+      "")
+  | where isnotempty(Technique)
+  | extend AgentHost = case(
+      ParentCmd has_any ("claude-code", "@anthropic-ai/claude-code") or Parent startswith "claude" or GrandParent startswith "claude", "Claude Code",
+      Parent startswith "cursor" or GrandParent startswith "cursor" or ParentCmd has "cursor-agent", "Cursor",
+      Parent startswith "windsurf" or GrandParent startswith "windsurf", "Windsurf",
+      ParentCmd has "codex" or Parent startswith "codex" or GrandParent startswith "codex", "Codex CLI",
+      Parent in (vscodeProcesses) or GrandParent in (vscodeProcesses), "VS Code (Copilot / extension or human terminal)",
+      ParentCmd has "gemini" or Parent == "gemini" or GrandParent == "gemini", "Gemini CLI",
+      "Other agent")
+  | project Timestamp, DeviceName, DeviceId, AccountName, AccountDomain, AgentHost, Technique, ProcessCommandLine,
+            FileName, InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessParentFileName,
+            CredAccess, Network, Encoding, ExfilDest, DownloadExec, ReportId
+entityMappings:
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: DeviceName
+  - entityType: Account
+    fieldMappings:
+      - identifier: Name
+        columnName: AccountName
+  - entityType: Process
+    fieldMappings:
+      - identifier: CommandLine
+        columnName: ProcessCommandLine
+customDetails:
+  AgentHost: AgentHost
+  Technique: Technique
+alertDetailsOverride:
+  alertDisplayNameFormat: "{{AgentHost}} ran: {{Technique}} on {{DeviceName}}"
+version: 1.0.0
+kind: Scheduled
