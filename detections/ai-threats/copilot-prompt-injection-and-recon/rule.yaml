@@ -1,11 +1,12 @@
 id: 9abe54cd-7089-49ff-a7f4-f87821e8d999
 name: M365 Copilot - prompt injection content, jailbreaks or Copilot-assisted recon by a risky session
 description: |
-  Scores Microsoft 365 Copilot interactions per user per hour. Fires when Copilot grounded on a resource that
-  Microsoft flagged as containing a cross-prompt injection attack (XPIA), when prompts trip the jailbreak
-  classifier, or when a user whose sign-in is risky, from a new country or behind an anonymising proxy suddenly
-  has Copilot pull far more content than usual, especially files named like credentials, VPN, payroll or banking.
-  Attackers with a stolen session increasingly ask Copilot to find secrets for them instead of browsing manually.
+  Scores Microsoft 365 Copilot use per user per hour. Alerts when Copilot used a resource that
+  Microsoft flagged as a cross-prompt injection attack (XPIA), when prompts trigger the jailbreak
+  classifier, or when a user with a risky sign-in, a new country or an anonymous proxy suddenly has
+  Copilot pull far more content than usual, especially files with names like credentials, VPN,
+  payroll or banking. Attackers with a stolen session are starting to ask Copilot to find secrets for
+  them.
 severity: Medium
 requiredDataConnectors:
   - connectorId: MicrosoftThreatProtection

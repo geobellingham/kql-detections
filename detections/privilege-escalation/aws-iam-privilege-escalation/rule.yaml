@@ -1,9 +1,10 @@
 id: f57df9c0-ecc9-455e-bb7b-8e3bb8c79296
 name: AWS IAM privilege escalation or credential creation for another identity
 description: |
-  An IAM identity grants admin-level permissions (AdministratorAccess, or an inline policy with Action "*"),
-  opens up a role's trust policy, or creates login credentials or access keys for a *different* user.
-  These are the common IAM paths from one foothold to full account control and persistence.
+  An IAM identity grants admin-level permissions (AdministratorAccess, or an inline policy with
+  Action "*"), opens up a role's trust policy, or creates login credentials or access keys for a
+  different user. These are the common IAM ways to go from a foothold to full control of the account
+  and keep access.
 severity: High
 requiredDataConnectors:
   - connectorId: AWS

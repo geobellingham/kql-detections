@@ -1,9 +1,9 @@
 id: ebfdcce1-6eca-443e-b21c-076e9d71fc9e
 name: Leaver bulk download from SharePoint/OneDrive
 description: |
-  A user who is on the leavers watchlist (resigned / notice period) downloads or syncs far more files
-  from SharePoint or OneDrive in the last day than their own 30-day baseline. Leavers taking data on the
-  way out usually do it in the days before their account is disabled, so this fires while there is
+  Someone on the leavers watchlist downloads or syncs a lot more files from SharePoint or OneDrive
+  in the last day than they normally do (compared with their own last 30 days). People taking data
+  with them usually do it in the days before their account is disabled, so this alerts while there's
   still time to act.
 severity: Medium
 requiredDataConnectors:

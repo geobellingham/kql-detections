@@ -1,10 +1,10 @@
 id: 88a09af7-89c1-4c09-9f54-05e286d3d3cd
 name: Encoded PowerShell command that downloads or executes remote code
 description: |
-  PowerShell is started with -EncodedCommand (or any abbreviation of it) and the decoded command contains
-  a download cradle or in-memory execution: Net.WebClient, Invoke-WebRequest, DownloadString, IEX,
-  FromBase64String, BITS. Encoding is a common way to hide a stager from command-line monitoring;
-  decoding it in the query gets back the visibility.
+  PowerShell is started with -EncodedCommand (or any short form of it) and the decoded command
+  downloads or runs remote code: Net.WebClient, Invoke-WebRequest, DownloadString, IEX,
+  FromBase64String or BITS. Attackers encode commands to hide them from command-line monitoring, so
+  the rule decodes them first.
 severity: High
 requiredDataConnectors:
   - connectorId: MicrosoftThreatProtection

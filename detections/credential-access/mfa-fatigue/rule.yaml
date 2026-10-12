@@ -1,9 +1,9 @@
 id: 9bc98993-0dee-48f2-9df6-801878c8c402
 name: MFA fatigue - repeated MFA denials, possibly followed by approval
 description: |
-  A user denies (or ignores) several MFA prompts within an hour. The password is already known to whoever
-  triggers the prompts, so this alone is worth a look. If an MFA-approved sign-in follows, the user most
-  likely gave in to the push spam and the account should be treated as compromised.
+  A user denies or ignores several MFA prompts within an hour. Whoever is triggering the prompts
+  already has the password, so this is worth a look by itself. If an MFA-approved sign-in follows,
+  the user probably gave in to the push spam and the account should be treated as compromised.
 severity: Medium
 requiredDataConnectors:
   - connectorId: AzureActiveDirectory

@@ -9,35 +9,35 @@
 | **Runs** | Daily over 31 days |
 
 ## Goal
-Catch employees taking company data in their notice period, before offboarding disables the account.
+Spot people taking company data during their notice period, while there's still time to do something about it.
 
-## Strategy
-"Lots of downloads" alone is useless as a signal: some roles download hundreds of files every day. So the rule only looks at people who are known to be leaving, and compares each of them **to their own history**:
+## How it works
+Some people download hundreds of files a day as part of their job, so a fixed threshold for everyone is useless. This rule only looks at people on the leavers list and compares each of them with their own history.
 
-1. Pull the `Leavers` watchlist (UPN + leave date). Keep anyone whose leave date is today or later.
-2. Collect SharePoint/OneDrive download and sync events for those users over the last 31 days.
-3. Build a per-user baseline from days 2–31: average and max files per active day.
-4. Alert when the last 24h is **≥ 50 files** *and* **> 3× the user's own average**.
+1. Read the `Leavers` watchlist (UPN and leave date) and keep everyone whose leave date is today or later.
+2. Pull their SharePoint and OneDrive download and sync events for the last 31 days.
+3. Work out each person's normal day from days 2 to 31: average and maximum files per active day.
+4. Alert when the last 24 hours has at least 50 files and more than 3 times their usual average.
 
-Users with no history at all get a baseline of 0, so any day above 50 files alerts. That's intended: a leaver who never used SharePoint and suddenly pulls 200 files is exactly the case.
+If someone has no history at all, their baseline is 0 and any day over 50 files alerts. A leaver who never touched SharePoint and suddenly pulls 200 files is exactly who you want to look at.
 
 ## Technical context
-- `FileSyncDownloadedFull` shows up when someone adds a library to the OneDrive sync client. It's the quiet way to take a whole site, so it's included alongside browser downloads.
-- The watchlist is the dependency. In practice it gets fed from the HR system or from the IAM offboarding ticket queue. Without it, use the retro hunt in [`hunting/disabled-account-prior-downloads.kql`](../../../hunting/disabled-account-prior-downloads.kql).
+- `FileSyncDownloadedFull` is logged when someone adds a library to the OneDrive sync client. It's the quiet way to grab a whole site, so it's included with normal downloads.
+- The rule depends on the watchlist. It's usually fed from the HR system or the offboarding tickets. If you don't have one, run the hunt in [`hunting/disabled-account-prior-downloads.kql`](../../../hunting/disabled-account-prior-downloads.kql) after the fact.
 
 ## Blind spots
-- Data leaving by other routes: email to a personal address, USB, personal cloud from a managed device, phone photos. Pair this with mail-forwarding ([inbox-forwarding-external](../../collection/inbox-forwarding-external/)) and Defender for Endpoint USB/cloud-upload events.
-- Slow exfiltration below 3× per day across the whole notice period. A weekly-volume variant catches that.
-- People who quit without HR knowing yet.
+- Other exit routes: mail to a personal address, USB, personal cloud storage, photos of the screen. Pair this with [inbox-forwarding-external](../../collection/inbox-forwarding-external/) and the Defender for Endpoint USB and cloud upload events.
+- Someone taking a little every day, under 3 times their normal. A weekly-volume version of the rule would catch that.
+- People who haven't told HR yet.
 
 ## False positives
-- Handover work: a leaver exporting their own project folders for the person taking over. Check whether the files are *theirs* and whether the destination is a colleague.
-- Sync client re-sync after a laptop rebuild produces a large `FileSyncDownloadedFull` burst. Check `ClientIPs`/device and whether the file set matches the user's normal libraries.
+- Handover work. A leaver exporting their own project folders for whoever takes over. Check if the files are theirs and who they're going to.
+- The sync client re-syncing after a laptop rebuild. Look at `ClientIPs` and whether the files match the libraries they normally use.
 
 ## Validation
-Add a test user to the `Leavers` watchlist with a future `LeaveDate`, then sync a SharePoint library with more than 50 files to a test device. The alert fires on the next run with `ActiveDays` = 0.
+Put a test user on the `Leavers` watchlist with a future leave date and sync a SharePoint library with more than 50 files to a test device. The next run should alert with `ActiveDays` = 0.
 
 ## Response
-1. Check `SampleFiles` and `FileTypes`. Is it customer data, source code, or their own work?
-2. Confirm with the manager/HR whether the download is part of a handover.
-3. If not: preserve the audit log, revoke sessions, and coordinate with HR/legal on an early account disable. Don't tip the user off before HR is involved.
+1. Look at `SampleFiles` and `FileTypes`. Customer data and source code are a problem. Their own work usually isn't.
+2. Ask the manager or HR whether it's part of a handover.
+3. If it isn't, keep the audit log, revoke the user's sessions and agree an early account disable with HR and legal. Don't tip the user off before HR is involved.

@@ -3,7 +3,7 @@
 //   AccountName = aoai-prod, AlertSeverity = High, Score = 11
 //   Reasons: Content filter / blocklist changed or deleted | Keys read by an identity not seen before |
 //            Request spike vs busiest baseline hour | Requests from never-seen IP ranges | Many 4xx from new ranges
-// MUST NOT appear:
+// Should not appear:
 //   - aoai-dev: steady traffic from its usual range, keys read only by the known pipeline
 let prodId = "/SUBSCRIPTIONS/0000/RESOURCEGROUPS/RG-AI/PROVIDERS/MICROSOFT.COGNITIVESERVICES/ACCOUNTS/AOAI-PROD";
 let devId  = "/SUBSCRIPTIONS/0000/RESOURCEGROUPS/RG-AI/PROVIDERS/MICROSOFT.COGNITIVESERVICES/ACCOUNTS/AOAI-DEV";

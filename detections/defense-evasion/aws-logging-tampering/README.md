@@ -9,36 +9,36 @@
 | **Runs** | Hourly over 1 hour |
 
 ## Goal
-Know immediately when someone blinds the AWS account: CloudTrail, GuardDuty or Config.
+Know straight away when someone turns off CloudTrail, GuardDuty or Config in an AWS account.
 
-## Strategy
-A lookup table (`datatable`) lists the API calls that reduce visibility, each with an impact level. Keeping the list in one place makes it easy to review and extend.
+## How it works
+A small lookup table (`datatable`) lists the API calls that reduce visibility, each with an impact level. Keeping them in one table makes them easy to review and add to.
 
 | Service | Calls |
 |---|---|
-| CloudTrail | `StopLogging`, `DeleteTrail`, `DeleteEventDataStore` (High); `UpdateTrail`, `PutEventSelectors` (Medium: can quietly drop data events or regions) |
-| GuardDuty | `DeleteDetector`, `Disassociate…` (High); `UpdateDetector` **only when it sets enable=false**, `CreateFilter` **only with action ARCHIVE** (auto-suppressing findings), `DeletePublishingDestination` |
+| CloudTrail | `StopLogging`, `DeleteTrail`, `DeleteEventDataStore` (High); `UpdateTrail`, `PutEventSelectors` (Medium, they can quietly drop data events or regions) |
+| GuardDuty | `DeleteDetector`, `Disassociate…` (High); `UpdateDetector` only when it sets enable=false, `CreateFilter` only with action ARCHIVE (auto-archiving findings), `DeletePublishingDestination` |
 | Config | `StopConfigurationRecorder`, `DeleteConfigurationRecorder`, `DeleteDeliveryChannel` |
 
-Events get grouped per identity + source IP, so an attacker turning off five things at once makes one alert listing all five. **Failed** calls (`ErrorCode` set, e.g. `AccessDenied`) are kept too, at Medium severity. Someone probing whether they're *allowed* to turn logging off is worth knowing about.
+Events are grouped by identity and source IP. If an attacker turns off five things at once, you get one alert that lists all five. Failed calls (where `ErrorCode` is set, e.g. `AccessDenied`) are kept as well, at Medium. Someone testing whether they're allowed to turn logging off is worth knowing about.
 
 ## Technical context
-- `StopLogging` is ironically still logged: the call itself is recorded before the trail stops. An organisation trail, or a second trail in a separate logging account, keeps recording after a member-account trail is stopped. Recommend that architecture alongside this rule.
-- `UserIdentityType` tells you whether it was an IAM user, an assumed role (`AssumedRole`, look at the session name in the ARN), or root.
+- `StopLogging` itself still gets logged, because the call is recorded before the trail stops. An organisation trail, or a second trail in a separate logging account, keeps recording after a member account's trail is stopped. It's worth recommending that setup alongside this rule.
+- `UserIdentityType` tells you if it was an IAM user, an assumed role (`AssumedRole`, the session name is in the ARN) or root.
 
 ## Blind spots
-- Tampering with the **destination** instead of the trail: S3 bucket policy changes, lifecycle rules deleting logs, KMS key disablement. Extend the datatable with `PutBucketPolicy`/`PutBucketLifecycle` filtered on the log bucket, and `DisableKey`/`ScheduleKeyDeletion` on the trail key.
-- Changes made in an account whose CloudTrail isn't ingested into Sentinel.
-- Security Hub / Detective changes (not in scope yet).
+- Tampering with where the logs go: S3 bucket policy changes, lifecycle rules that delete logs, disabling the KMS key. You can add `PutBucketPolicy`/`PutBucketLifecycle` on the log bucket and `DisableKey`/`ScheduleKeyDeletion` on the trail key to the table.
+- Changes in accounts whose CloudTrail isn't sent to Sentinel.
+- Security Hub and Detective changes, which aren't covered yet.
 
 ## False positives
-- Infrastructure-as-code pipelines (Terraform, CloudFormation) legitimately updating trails or detectors. `UserAgent` will show the tool and `UserIdentityArn` the pipeline role. Exclude that role, but only for the Medium-impact calls.
-- Account decommissioning.
+- Infrastructure-as-code pipelines (Terraform, CloudFormation) updating trails or detectors. `UserAgent` shows the tool and `UserIdentityArn` the pipeline role. Exclude that role, but only for the Medium-impact calls.
+- Accounts being decommissioned.
 
 ## Validation
-In a sandbox AWS account: `aws cloudtrail stop-logging --name <trail>`, then `start-logging`. One High alert listing `StopLogging`.
+In a sandbox AWS account, run `aws cloudtrail stop-logging --name <trail>`, then `start-logging`. You should get one High alert listing `StopLogging`.
 
 ## Response
-1. Re-enable the logging right away.
-2. Treat the identity as compromised unless a change ticket explains it: disable its access keys / revoke role sessions, and review everything it did in the hour before and after (from the organisation trail if the member trail was off).
-3. Check for the next steps attackers usually take: new IAM users/keys ([aws-iam-privilege-escalation](../../privilege-escalation/aws-iam-privilege-escalation/)), new EC2 instances in unused regions, S3 data access.
+1. Turn the logging back on straight away.
+2. Treat the identity as compromised unless there's a change ticket for it. Disable its access keys or revoke the role sessions, and go through everything it did in the hour before and after, using the organisation trail if the member trail was off.
+3. Look for what attackers usually do next: new IAM users or keys (see [aws-iam-privilege-escalation](../../privilege-escalation/aws-iam-privilege-escalation/)), new EC2 instances in regions you don't use, S3 data access.

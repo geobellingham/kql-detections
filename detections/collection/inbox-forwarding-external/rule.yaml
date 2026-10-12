@@ -2,8 +2,8 @@ id: 8577d91d-52eb-416a-b8d5-90512a76658e
 name: Mailbox forwarding or inbox rule to an external address
 description: |
   A user creates or changes an inbox rule or mailbox setting that forwards or redirects mail to an
-  address outside the organisation's domains. This is one of the first things attackers do after taking
-  over a mailbox (to watch invoice threads for BEC), and also how leavers quietly keep a copy of their mail.
+  address outside the company's domains. Attackers do this soon after taking over a mailbox, usually
+  to watch invoice threads for BEC. Leavers do it to keep a copy of their mail.
 severity: Medium
 requiredDataConnectors:
   - connectorId: Office365

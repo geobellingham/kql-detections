@@ -1,9 +1,9 @@
 id: 823e5821-5bf1-450d-8ba5-8d629c1fdca0
 name: AWS security logging disabled or tampered with (CloudTrail, GuardDuty, Config)
 description: |
-  Someone stops or deletes a CloudTrail trail, changes what it records, disables GuardDuty or suppresses
-  its findings, or stops AWS Config recording. Turning off the cameras is a standard step before (or
-  right after) an attacker does the real damage in an AWS account.
+  Someone stops or deletes a CloudTrail trail, changes what it records, disables GuardDuty or
+  auto-archives its findings, or stops AWS Config recording. Attackers turn off logging just before or
+  just after they do the real damage in an AWS account.
 severity: High
 requiredDataConnectors:
   - connectorId: AWS

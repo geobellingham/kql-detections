@@ -9,22 +9,22 @@
 | **Runs** | <frequency> over <period> |
 
 ## Goal
-One or two sentences: what attacker behaviour this catches and why it matters.
+A sentence or two on what attacker behaviour this catches and why it's worth catching.
 
-## Strategy
-How the query works, step by step. Explain each threshold and why it's set where it is.
+## How it works
+What the query does, step by step. Explain each threshold and why it's set where it is.
 
 ## Technical context
-What an analyst needs to know about the data source and the technique to understand the alert.
+Anything about the data source or the technique that an analyst needs to understand the alert.
 
 ## Blind spots
-What this rule will **not** catch, and what covers that gap.
+What this rule won't catch, and what could cover that.
 
 ## False positives
-Known benign causes, and how to tell them apart quickly.
+Known harmless causes, and how to tell them apart quickly.
 
 ## Validation
-How to trigger the rule safely in a lab, and what the resulting alert looks like.
+How to trigger the rule safely in a lab, and what the alert should look like.
 
 ## Response
-First steps for the analyst who receives the alert.
+First steps for the analyst who gets the alert.

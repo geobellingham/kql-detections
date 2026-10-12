@@ -1,11 +1,11 @@
 id: f6d64327-168c-4416-b97a-b2b238fd9c0d
 name: LLMjacking - AWS Bedrock recon and model access abuse with stolen credentials
 description: |
-  An AWS identity that doesn't normally use Amazon Bedrock starts enumerating foundation models, checks
-  whether prompt logging is enabled, probes models with invalid calls, enables model access, creates a
-  Bedrock API key, or turns invocation logging off. This is the LLMjacking playbook: stolen cloud keys
-  used to run (or resell) expensive model inference on the victim's bill, and increasingly to power
-  attackers' own AI tooling. Signals are scored and the reasons listed in the alert.
+  An AWS identity that doesn't normally use Amazon Bedrock starts listing foundation models, checks
+  whether prompt logging is on, sends broken test calls to models, enables model access, creates a
+  Bedrock API key, or turns off invocation logging. This is how LLMjacking works: stolen cloud keys
+  are used to run or resell expensive model inference on the victim's bill, and more and more to run
+  the attackers' own AI tools. Each signal adds points and the reasons are listed in the alert.
 severity: Medium
 requiredDataConnectors:
   - connectorId: AWS

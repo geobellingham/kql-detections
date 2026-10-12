@@ -9,25 +9,25 @@
 | **Runs** | Hourly over 2 hours |
 
 ## Goal
-Catch throwaway local accounts: created, used, and deleted before anyone looks.
+Catch throwaway local accounts that get created, used and deleted before anyone notices.
 
-## Strategy
-Account *creation* on servers is too common to alert on. Creation **plus** deletion of the same name on the same host within an hour isn't.
+## How it works
+Accounts get created on servers all the time, so creation alone is too noisy. The same account being created and deleted on the same host within an hour is unusual.
 
-1. Parse `useradd` "new user: name=X, UID=N" and `userdel` "delete user 'X'".
-2. Join on host + account name, keeping pairs where the delete comes within `maxLifetime` (60 min) of the create.
-3. Left-join SSH `Accepted` logins for that account and count only those inside its lifetime.
+1. Parse `useradd` ("new user: name=X, UID=N") and `userdel` ("delete user 'X'").
+2. Join on host and account name and keep pairs where the delete happens within 60 minutes of the create.
+3. Join SSH `Accepted` logins for that account and count the ones that happened while it existed.
 
-The query window is 2h with an hourly schedule, so a pair that straddles a run boundary is still caught. A pair that falls entirely inside the overlap can alert twice. Alert grouping on `Computer` + `AccountName` handles that.
+The query looks back 2 hours and runs every hour, so a pair that crosses a run boundary is still caught. A pair inside the overlap can alert twice. Group alerts on `Computer` and `AccountName` to merge them.
 
 ## Technical context
-- Accounts created with `adduser` still log through `useradd`. Accounts created by editing `/etc/passwd` directly leave **no** useradd entry. That's a separate detection (auditd file-watch on `/etc/passwd` and `/etc/shadow`).
-- `UID=0` on a new account is a red flag by itself: a second root.
+- `adduser` still logs through `useradd`. Editing `/etc/passwd` directly leaves no useradd entry at all, so that needs its own detection (auditd watch on `/etc/passwd` and `/etc/shadow`).
+- A new account with `UID=0` is a second root account. That's suspicious by itself.
 
 ## Blind spots
-- Direct `/etc/passwd` edits, as above.
-- Accounts left in place (not deleted). Cover those with a "new local account on a server outside a change window" rule.
-- Lifetimes longer than 1 hour. Widen `maxLifetime` with the query period if your environment is quiet enough.
+- Direct edits of `/etc/passwd`, as above.
+- Accounts that are created and left in place. A "new local account on a server outside a change window" rule covers those.
+- Accounts that live longer than an hour. You can raise `maxLifetime` together with the query period if your servers are quiet enough.
 
 ## False positives
 - CI/CD runners, container build hosts and test harnesses that create and remove users. Add them to `excludedAccounts` or exclude the hosts.
@@ -37,9 +37,9 @@ The query window is 2h with an hourly schedule, so a pair that straddles a run b
 ```bash
 sudo useradd -m tmp_test && sleep 60 && sudo userdel -r tmp_test
 ```
-One alert with `LifetimeMinutes` ≈ 1 and `LoginsDuringLifetime = 0`.
+You should get one alert with `LifetimeMinutes` around 1 and `LoginsDuringLifetime = 0`.
 
 ## Response
 1. Find who ran it: `sudo` entries in the same Syslog window, or the parent session.
-2. If the account logged in, review everything that session did: bash history, auditd, new files, cron.
-3. Check for the brute-force path that led here ([ssh-bruteforce-then-success](../../credential-access/ssh-bruteforce-then-success/)).
+2. If the account logged in, go through everything that session did: bash history, auditd, new files, cron.
+3. Look for how the attacker got in, for example [ssh-bruteforce-then-success](../../credential-access/ssh-bruteforce-then-success/).

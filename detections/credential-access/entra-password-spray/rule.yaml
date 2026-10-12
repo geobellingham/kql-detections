@@ -1,9 +1,9 @@
 id: 96eec599-32db-4bf4-b99f-f165c6399d4d
 name: Password spray against Entra ID from a single IP
 description: |
-  One IP fails sign-ins against many different accounts with only a few attempts each, which is the
-  shape of a password spray (one or two common passwords tried across the directory) rather than a
-  brute force against one account. Flags any account the same IP then signed into successfully.
+  One IP fails sign-ins against many different accounts with only a few attempts each. That's what a
+  password spray looks like: one or two common passwords tried across the whole directory. Any account
+  the same IP then signed into successfully is listed in the alert.
 severity: Medium
 requiredDataConnectors:
   - connectorId: AzureActiveDirectory
@@ -19,7 +19,7 @@ relevantTechniques:
   - T1110.003
 query: |
   let minFailedAccounts = 15;
-  let maxAttemptsPerAccount = 3.0;   // above this it looks like brute force, not spray
+  let maxAttemptsPerAccount = 3.0;   // above this it's brute force
   // 50126 invalid username/password, 50053 locked/smart lockout, 50055 expired password, 50056 no password
   let failureCodes = dynamic(["50126", "50053", "50055", "50056"]);
   SigninLogs

@@ -1,13 +1,12 @@
 id: 7ae35f4f-5ec6-40f6-9dbd-ae1b993628a1
 name: Suspicious MFA / security info change (risk-scored)
 description: |
-  A user's authentication methods are registered, changed or deleted in Entra ID, and the change comes with
-  enough supporting evidence to be worth an analyst's time: new country or IP compared with the user's own
-  baseline, a risky sign-in, password spray or risky sign-ins in the 24h before, forwarding/delete inbox rules,
-  other alerts on the user, a method added by someone else, or a delete-and-re-add swap. Attackers who steal
-  a session (AiTM phishing, token theft) register their own MFA method to keep access, so this is one of the
-  most valuable persistence signals in Entra ID. Each signal adds to a score; the alert fires above a threshold
-  and lists the reasons.
+  A user's authentication methods are registered, changed or deleted in Entra ID, together with other
+  signs that something is wrong: a new country or IP compared with the user's history, a risky sign-in,
+  password spray or risky sign-ins in the 24 hours before, forwarding or delete inbox rules, other
+  alerts on the user, a method added by someone else, or a method deleted and re-added. Attackers who
+  steal a session (AiTM phishing, token theft) register their own MFA method to keep access. Each signal
+  adds points, the alert fires above a threshold, and the reasons are listed in the alert.
 severity: Medium
 requiredDataConnectors:
   - connectorId: AzureActiveDirectory
@@ -36,8 +35,8 @@ query: |
   let baselineDays    = 13d;    // + maxIngestDelay must stay within Sentinel's 14d query period
   let scoreThreshold  = 4;      // backtest before changing (see README)
   let highThreshold   = 7;
-  // Microsoft backend IPs that appear as InitiatedBy.user.ipAddress for some self-service
-  // registrations - not the user's client. Populate from your own AuditLogs.
+  // Microsoft backend IPs that show up as InitiatedBy.user.ipAddress for some self-service
+  // registrations. They aren't the user's own IP. Fill in from your own AuditLogs.
   let backendRanges   = dynamic([]);
   let trustedIPs      = dynamic([]);        // corporate egress IPs, never counted as "new"
   let allowedAdmins   = dynamic([]);        // helpdesk/IAM accounts allowed to add methods for others

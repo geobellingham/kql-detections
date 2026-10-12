@@ -1,9 +1,9 @@
 id: fb9b17d3-e07f-4689-8c40-6d7c9678f33f
 name: Periodic beaconing to a rare external destination (FortiGate)
 description: |
-  An internal host connects to the same external IP and port at a near-constant interval, many times a day,
-  and few or no other internal hosts talk to that destination. Regular timing to a rare destination is the
-  signature of malware or C2 implants checking in.
+  An internal host connects to the same external IP and port at an almost fixed interval, many times
+  a day, and few or no other internal hosts talk to that destination. Malware and C2 implants check in
+  like this.
 severity: Medium
 requiredDataConnectors:
   - connectorId: Fortinet

@@ -1,9 +1,9 @@
 id: 66b0697b-3876-4ee3-97c0-7d8141ca7992
 name: Executable or script downloaded from a domain never seen before (Zscaler)
 description: |
-  A user downloads an executable, installer, script or disk image through Zscaler from a domain nobody in
-  the organisation has visited in the previous 14 days. Malware delivery (phishing links, malvertising, fake
-  updates) almost always comes from new or rarely seen domains.
+  A user downloads an executable, installer, script or disk image through Zscaler from a domain nobody
+  in the company has visited in the last 14 days. Malware delivery (phishing links, malvertising, fake
+  updates) nearly always comes from new or rarely seen domains.
 severity: Medium
 requiredDataConnectors:
   - connectorId: Zscaler

@@ -2,7 +2,7 @@
 // EXPECT: exactly 2 rows
 //   u-victim : AlertSeverity High,   Score 11 (risky sign-in 3, resource spike 2, sensitive hunt 2, new country 2, anon proxy 2)
 //   u-xpia   : AlertSeverity Medium, Score 3  (Copilot used a resource flagged for prompt injection)
-// MUST NOT appear:
+// Should not appear:
 //   - u-normal : usual volume, usual country
 //   - u-curious: a jailbreak attempt alone (2 points, under the threshold of 3)
 let bulkResources = toscalar(

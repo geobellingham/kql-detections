@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Regex unit tests for detections that depend on pattern matching.
+"""Tests for the regexes used in the detections.
 
-Patterns are read straight from each rule.yaml (KQL verbatim strings @"..."), converted to Python
-syntax ("" -> "), and run against positive and negative samples. Kusto uses RE2; every construct used
-in these patterns (classes, alternation, \\b, anchors) behaves the same in Python's re module.
+The patterns are read from each rule.yaml (KQL verbatim strings @"..."), converted to Python
+syntax ("" becomes "), and run against examples that should and shouldn't match. Kusto uses RE2,
+and the parts used here (character classes, alternation, \\b, anchors) work the same way in
+Python's re module.
 Run: python3 tests/regex_test.py
 """
 import re, sys, pathlib, yaml

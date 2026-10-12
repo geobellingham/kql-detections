@@ -2,8 +2,9 @@ id: f5922501-1675-4296-8fc4-0b8e7e4b66bb
 name: Short-lived local account on Linux host (created and deleted within 1 hour)
 description: |
   A local account is created with useradd and deleted with userdel on the same host within an hour.
-  Admins rarely do this. Attackers do: a temporary account for access or privilege escalation, removed
-  afterwards to clean up. The rule also reports whether the account logged in over SSH while it existed.
+  Admins rarely do this. Attackers do it to get temporary access or escalate privileges, then delete
+  the account to cover their tracks. The alert also shows if the account logged in over SSH while it
+  existed.
 severity: Medium
 requiredDataConnectors:
   - connectorId: Syslog

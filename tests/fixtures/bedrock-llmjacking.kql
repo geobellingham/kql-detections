@@ -3,7 +3,7 @@
 //   UserIdentityArn = arn:aws:iam::123456789012:user/ci-deploy, AlertSeverity = High, Score = 13
 //   Reasons: Model access enabled | Checked whether prompt logging is on | Invoke probes failing across models |
 //            Identity never used Bedrock in 13d | New source IP | 3+ different models | 3+ regions | Long-term IAM user key
-// MUST NOT appear:
+// Should not appear:
 //   - approved app role arn:aws:iam::111111111111:role/genai-app-prod (heavy but allow-listed)
 //   - developer alice, who already used Bedrock from the same IP 2 days ago
 let AWSCloudTrail = datatable(

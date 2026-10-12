@@ -1,9 +1,9 @@
 id: d28015b4-fde0-45fa-b669-e6f52365611d
 name: SSH brute force followed by successful login (Linux Syslog)
 description: |
-  A single source IP generates many failed SSH logins against a Linux host and then logs in
-  successfully from that same IP. Failed-login noise on internet-facing SSH is constant; the
-  success afterwards is what turns it into an incident.
+  One source IP fails a lot of SSH logins against a Linux host and then logs in successfully from
+  the same IP. Failed SSH logins from the internet happen all day. A successful login right after
+  them is the part worth investigating.
 severity: High
 requiredDataConnectors:
   - connectorId: Syslog

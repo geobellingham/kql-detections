@@ -2,7 +2,7 @@
 // EXPECT: exactly 2 rows
 //   InternalHost 10.0.5.20 | Inbound: exposed inference server | High   | ExternalSources 2 | Paths [/api/generate, /api/tags]
 //   InternalHost 10.0.8.15 | Outbound: internal host using an external inference server | Medium | ExternalHost 103.77.1.9
-// MUST NOT appear:
+// Should not appear:
 //   - denied inbound to 10.0.5.30:11434
 //   - outbound HTTPS to a SaaS LLM API path (normal use)
 //   - inbound to an ordinary web API path

@@ -1,11 +1,11 @@
 id: 35bb0716-ea8d-413b-affb-52c5bae90192
 name: AI coding agent runs credential theft or download-and-execute commands (likely prompt injection)
 description: |
-  A shell command started by an AI coding agent or AI-enabled IDE (Claude Code, Cursor, Windsurf, VS Code /
-  Copilot agent, Codex CLI, Gemini CLI, Aider, Goose, Cline) reads credential files and sends or encodes them,
-  pipes a download straight into a shell, or talks to a known exfiltration endpoint. Agents follow instructions
-  hidden in repos, web pages, issues and MCP tool descriptions; this is what a successful indirect prompt
-  injection looks like on the developer's machine.
+  A shell command started by an AI coding agent or AI IDE (Claude Code, Cursor, Windsurf, VS Code /
+  Copilot agent, Codex CLI, Gemini CLI, Aider, Goose, Cline) reads credential files and sends or
+  encodes them, pipes a download straight into a shell, or talks to a known exfiltration service.
+  Agents follow instructions hidden in repos, web pages, issues and MCP tool descriptions, and this is
+  what a successful prompt injection looks like on the developer's machine.
 severity: High
 requiredDataConnectors:
   - connectorId: MicrosoftThreatProtection
@@ -31,7 +31,7 @@ query: |
                                 "windsurf", "windsurf.exe", "code", "code.exe", "code helper", "code helper (plugin)",
                                 "codex", "codex.exe", "gemini", "aider", "goose", "goose.exe"]);
   let vscodeProcesses = dynamic(["code", "code.exe", "code helper", "code helper (plugin)"]);
-  // Agents installed via npm/pip run as node/python: recognise them from the command line
+  // Agents installed with npm/pip run as node/python, so look at the command line
   let agentCmdMarkers = dynamic(["@anthropic-ai/claude-code", "claude-code", "@openai/codex", "@google/gemini-cli",
                                  "@github/copilot", "cursor-agent", "aider-chat", "goose"]);
   // Installers agents are commonly asked to run - excluded from the download-and-execute branch

@@ -1,7 +1,7 @@
 // Hunt: accounts disabled in the last 30 days that downloaded unusually many files
 // in the 14 days before they were disabled.
-// Retrospective companion to detections/exfiltration/leaver-bulk-download for tenants
-// without a Leavers watchlist. ATT&CK: T1530, T1213.
+// Use this after the fact if you don't have a Leavers watchlist for
+// detections/exfiltration/leaver-bulk-download. ATT&CK: T1530, T1213.
 let lookback = 30d;
 let preDisableWindow = 14d;
 let minFiles = 100;

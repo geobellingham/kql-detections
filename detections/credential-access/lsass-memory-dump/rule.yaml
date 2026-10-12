@@ -1,9 +1,9 @@
 id: d4b56bd0-d823-4d16-a064-57f6faf5b455
 name: LSASS memory dump via LOLBins or common dumping tools
 description: |
-  A process command line dumps the memory of lsass.exe: comsvcs.dll MiniDump via rundll32, ProcDump with
-  -ma, createdump, or common tools such as Out-Minidump and Mimikatz commands. Dumping LSASS gives an
-  attacker every credential and token cached on the host.
+  A process command line dumps the memory of lsass.exe, for example comsvcs.dll MiniDump through
+  rundll32, ProcDump with -ma, createdump, or tools like Out-Minidump and Mimikatz. An LSASS dump gives
+  an attacker every credential and token cached on the host.
 severity: High
 requiredDataConnectors:
   - connectorId: MicrosoftThreatProtection
