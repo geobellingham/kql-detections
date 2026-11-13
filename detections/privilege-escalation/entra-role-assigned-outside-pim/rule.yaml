@@ -1,0 +1,147 @@
+id: 5ddf9514-19de-496b-9cc9-c08f835c78cc
+name: Privileged Entra role assigned outside PIM or made permanent (risk-scored)
+description: |
+  A privileged Entra ID role is assigned directly, bypassing PIM, or as a permanent active assignment.
+  PIM activations are left out, since those are the normal path. Each assignment is scored on the role's
+  tier, how it was made, and who is involved: a service principal or guest as the target, an account
+  created in the last week, someone assigning a role to themselves, or an assigner who hasn't assigned
+  roles before. An attacker with a compromised admin uses exactly this to keep access: create an account
+  or app, make it Global Administrator, come back later.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1098.003
+  - T1136.003
+query: |
+  let lookback         = 1h;     // match the rule frequency
+  let baselineDays     = 13d;
+  let newAccountWindow = 7d;     // target created this recently counts as a new account
+  let scoreThreshold   = 5;
+  let highThreshold    = 7;
+  // Roles that can take over the tenant or its identities. "Company Administrator" is the old audit-log name for Global Administrator.
+  let tier0Roles = dynamic(["Global Administrator", "Company Administrator", "Privileged Role Administrator",
+                            "Privileged Authentication Administrator", "Security Administrator", "Hybrid Identity Administrator",
+                            "Application Administrator", "Cloud Application Administrator", "Conditional Access Administrator",
+                            "Domain Name Administrator", "Partner Tier2 Support"]);
+  let privilegedRoles = dynamic(["User Administrator", "Authentication Administrator", "Authentication Policy Administrator",
+                                 "Exchange Administrator", "SharePoint Administrator", "Intune Administrator",
+                                 "Helpdesk Administrator", "Password Administrator", "Groups Administrator"]);
+  // Apps allowed to assign roles on their own (identity governance or provisioning tools), by display name
+  let approvedAutomation = dynamic([]);
+  let directOps    = dynamic(["Add member to role", "Add member to role outside of PIM (permanent)"]);
+  let permanentOp  = "Add member to role in PIM completed (permanent)";
+  // ===== 1. Role assignments, parsed for both the Core Directory and the PIM event shape =====
+  let assignments = AuditLogs
+      | where TimeGenerated > ago(baselineDays + lookback)
+      | where Category == "RoleManagement" and Result =~ "success"
+      | where OperationName in (directOps) or OperationName == permanentOp
+      | extend InitiatorUPN = tolower(tostring(InitiatedBy.user.userPrincipalName)),
+               InitiatorApp = tostring(InitiatedBy.app.displayName),
+               InitiatorIP  = tostring(InitiatedBy.user.ipAddress),
+               Props        = TargetResources[0].modifiedProperties
+      // A PIM activation is written to the directory by the MS-PIM service principal. That's normal use.
+      | where not(OperationName == "Add member to role" and InitiatorApp startswith "MS-PIM")
+      | mv-apply T = TargetResources on (
+          extend TType = tostring(T.type)
+          | summarize RoleFromTarget = take_anyif(tostring(T.displayName), TType =~ "Role" and isnotempty(tostring(T.displayName))),
+                      TargetType     = take_anyif(TType, TType in~ ("User", "ServicePrincipal", "Group")),
+                      TargetId       = take_anyif(tolower(tostring(T.id)), TType in~ ("User", "ServicePrincipal", "Group")),
+                      TargetName     = take_anyif(tostring(T.displayName), TType in~ ("User", "ServicePrincipal", "Group")),
+                      TargetUPN      = take_anyif(tolower(tostring(T.userPrincipalName)), TType =~ "User"))
+      // Core Directory events carry the role name in modifiedProperties. mv-apply drops rows with an
+      // empty array, so PIM events (no modifiedProperties) get a placeholder.
+      | mv-apply P = iff(array_length(Props) > 0, Props, dynamic([{"displayName": "none"}])) on (
+          summarize RoleFromProps = take_anyif(trim(@'"', tostring(P.newValue)), tostring(P.displayName) == "Role.DisplayName"))
+      | extend Role = coalesce(RoleFromTarget, RoleFromProps)
+      | where isnotempty(Role) and isnotempty(TargetId);
+  // Everyone who assigned a role before this run
+  let knownAssigners = toscalar(assignments
+      | where TimeGenerated <= ago(lookback) and isnotempty(InitiatorUPN)
+      | summarize make_set(InitiatorUPN, 5000));
+  // ===== 2. Assignments in this run. A direct assignment is logged twice (directory + PIM), so merge per target and role. =====
+  let recent = assignments
+      | where TimeGenerated > ago(lookback)
+      | where Role in~ (tier0Roles) or Role in~ (privilegedRoles)
+      | summarize FirstSeen     = min(TimeGenerated),
+                  Operations    = make_set(OperationName, 5),
+                  Initiators    = make_set_if(InitiatorUPN, isnotempty(InitiatorUPN), 5),
+                  InitiatorApps = make_set_if(InitiatorApp, isnotempty(InitiatorApp), 5),
+                  InitiatorIPs  = make_set_if(InitiatorIP, isnotempty(InitiatorIP), 5),
+                  TargetType    = max(TargetType),
+                  TargetName    = max(TargetName),
+                  TargetUPN     = max(TargetUPN)
+                  by TargetId, Role;
+  // ===== 3. Accounts and apps created recently =====
+  let newAccounts = AuditLogs
+      | where TimeGenerated > ago(newAccountWindow)
+      | where OperationName in ("Add user", "Add service principal") and Result =~ "success"
+      | extend TargetId = tolower(tostring(TargetResources[0].id))
+      | summarize Created = min(TimeGenerated), CreatedBy = take_any(tolower(tostring(InitiatedBy.user.userPrincipalName))) by TargetId;
+  // ===== 4. Score =====
+  recent
+  | join kind=leftouter newAccounts on TargetId
+  | extend Initiator    = tostring(Initiators[0]),
+           InitiatorApp = tostring(InitiatorApps[0]),
+           InitiatorIP  = tostring(InitiatorIPs[0])
+  | extend Tier0          = Role in~ (tier0Roles),
+           Direct         = array_length(set_intersect(Operations, directOps)) > 0,
+           TargetIsApp    = TargetType =~ "ServicePrincipal",
+           TargetIsGuest  = TargetUPN contains "#ext#",
+           SelfAssigned   = isnotempty(TargetUPN) and set_has_element(Initiators, TargetUPN),
+           NewAccount     = isnotnull(Created),
+           NewAssigner    = isnotempty(Initiator) and not(coalesce(set_has_element(knownAssigners, Initiator), false)),
+           ByApp          = isempty(Initiator) and isnotempty(InitiatorApp) and not(InitiatorApp in~ (approvedAutomation))
+  | extend PermanentInPim = not(Direct) and set_has_element(Operations, permanentOp)
+  | extend Score = iff(Tier0, 3, 1)
+                 + 2 * toint(Direct) + 2 * toint(TargetIsApp) + 2 * toint(TargetIsGuest) + 2 * toint(SelfAssigned) + 2 * toint(NewAccount)
+                 + 1 * toint(PermanentInPim) + 1 * toint(NewAssigner) + 1 * toint(ByApp)
+  | extend Reasons = strcat_array(array_concat(
+        iff(Tier0,          dynamic(["Tier-0 role"]), dynamic(["Privileged role"])),
+        iff(Direct,         dynamic(["Assigned directly, outside PIM"]), dynamic([])),
+        iff(PermanentInPim, dynamic(["Permanent active assignment"]), dynamic([])),
+        iff(TargetIsApp,    dynamic(["Target is a service principal"]), dynamic([])),
+        iff(TargetIsGuest,  dynamic(["Target is a guest"]), dynamic([])),
+        iff(SelfAssigned,   dynamic(["Assigned to themselves"]), dynamic([])),
+        iff(NewAccount,     dynamic(["Target was created in the last 7 days"]), dynamic([])),
+        iff(NewAssigner,    dynamic(["Assigner hasn't assigned roles in 13 days"]), dynamic([])),
+        iff(ByApp,          dynamic(["Assigned by an application"]), dynamic([]))), " | ")
+  | where Score >= scoreThreshold
+  | extend AlertSeverity = iff(Score >= highThreshold, "High", "Medium"),
+           Target = coalesce(TargetUPN, TargetName, TargetId),
+           Actor  = coalesce(Initiator, InitiatorApp)
+  | project AlertSeverity, FirstSeen, Role, Target, TargetType, TargetId, Actor, InitiatorIP, Score, Reasons,
+            Operations, Initiators, InitiatorApps, Created, CreatedBy
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Target
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Actor
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: InitiatorIP
+customDetails:
+  Role: Role
+  Score: Score
+  Reasons: Reasons
+  TargetType: TargetType
+alertDetailsOverride:
+  alertDisplayNameFormat: "{{Role}} assigned to {{Target}} outside the normal PIM path (score {{Score}})"
+  alertDescriptionFormat: "Assigned by {{Actor}}. Reasons: {{Reasons}}"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

@@ -1,0 +1,61 @@
+// Test fixture: oauth-illicit-consent
+// EXPECT: exactly 2 rows
+//   alice@contoso.com -> "OneDrive Document Viewer": AlertSeverity High, Score 8
+//       (mail 2, app new in tenant 2, offline_access 1, user consent 1, lure name 1, new IP 1)
+//   carol@contoso.com -> "Secure Mail Upgrade": AlertSeverity High, Score 10, Blocked = true
+//       (flagged risky 5, mail 2, offline_access 1, user consent 1, lure name 1)
+// Should not appear:
+//   - bob: consents to an app that has been in the tenant for 10 days, calendar scopes only
+//   - dave: admin consent for all users, but only read-basic scopes on an old app
+let AuditLogs = datatable(Offset: timespan, OperationName: string, Result: string, ResultReason: string,
+                          TargetResources: dynamic, InitiatedBy: dynamic)
+[
+    // alice: the service principal appears a minute before she consents, from an IP she has never used
+    -31m, "Add service principal", "success", "",
+        dynamic([{"id": "sp-evil", "displayName": "OneDrive Document Viewer", "type": "ServicePrincipal"}]),
+        dynamic({"user": {"userPrincipalName": "alice@contoso.com", "ipAddress": "185.220.101.9"}}),
+    -30m, "Consent to application", "success", "",
+        dynamic([{"id": "sp-evil", "displayName": "OneDrive Document Viewer", "type": "ServicePrincipal", "modifiedProperties": [
+            {"displayName": "ConsentContext.IsAdminConsent", "newValue": "False"},
+            {"displayName": "ConsentContext.OnBehalfOfAll", "newValue": "False"},
+            {"displayName": "ConsentAction.Permissions", "newValue": "[] => [[Id: g1, ClientId: sp-evil, PrincipalId: u-alice, ResourceId: graph, ConsentType: Principal, Scope: User.Read Mail.Read offline_access, CreatedDateTime: , LastModifiedDateTime: ]]"}]}]),
+        dynamic({"user": {"userPrincipalName": "alice@contoso.com", "ipAddress": "185.220.101.9"}}),
+    // bob: an app the tenant already uses, harmless scopes
+    -10d, "Add service principal", "success", "",
+        dynamic([{"id": "sp-travel", "displayName": "Contoso Travel", "type": "ServicePrincipal"}]),
+        dynamic({"user": {"userPrincipalName": "admin.kim@contoso.com", "ipAddress": "203.0.113.10"}}),
+    -20m, "Consent to application", "success", "",
+        dynamic([{"id": "sp-travel", "displayName": "Contoso Travel", "type": "ServicePrincipal", "modifiedProperties": [
+            {"displayName": "ConsentContext.IsAdminConsent", "newValue": "False"},
+            {"displayName": "ConsentContext.OnBehalfOfAll", "newValue": "False"},
+            {"displayName": "ConsentAction.Permissions", "newValue": "[] => [[Id: g2, ClientId: sp-travel, PrincipalId: u-bob, ResourceId: graph, ConsentType: Principal, Scope: User.Read Calendars.Read, CreatedDateTime: , LastModifiedDateTime: ]]"}]}]),
+        dynamic({"user": {"userPrincipalName": "bob@contoso.com", "ipAddress": "203.0.113.11"}}),
+    // carol: Microsoft's risk-based step-up stopped the consent, so it is logged as a failure
+    -15m, "Consent to application", "failure", "Microsoft.Online.Security.UserConsentBlockedForRiskyAppsException",
+        dynamic([{"id": "sp-risky", "displayName": "Secure Mail Upgrade", "type": "ServicePrincipal", "modifiedProperties": [
+            {"displayName": "ConsentContext.IsAdminConsent", "newValue": "False"},
+            {"displayName": "ConsentContext.OnBehalfOfAll", "newValue": "False"},
+            {"displayName": "ConsentAction.Permissions", "newValue": "[] => [[Id: g3, ClientId: sp-risky, PrincipalId: u-carol, ResourceId: graph, ConsentType: Principal, Scope: Mail.ReadWrite offline_access, CreatedDateTime: , LastModifiedDateTime: ]]"},
+            {"displayName": "ConsentAction.Reason", "newValue": "Risky application detected"}]}]),
+        dynamic({"user": {"userPrincipalName": "carol@contoso.com", "ipAddress": "203.0.113.12"}}),
+    // dave: tenant-wide admin consent, nothing sensitive granted
+    -9d, "Add service principal", "success", "",
+        dynamic([{"id": "sp-hr", "displayName": "Contoso HR Portal", "type": "ServicePrincipal"}]),
+        dynamic({"user": {"userPrincipalName": "dave@contoso.com", "ipAddress": "203.0.113.13"}}),
+    -10m, "Consent to application", "success", "",
+        dynamic([{"id": "sp-hr", "displayName": "Contoso HR Portal", "type": "ServicePrincipal", "modifiedProperties": [
+            {"displayName": "ConsentContext.IsAdminConsent", "newValue": "True"},
+            {"displayName": "ConsentContext.OnBehalfOfAll", "newValue": "True"},
+            {"displayName": "ConsentAction.Permissions", "newValue": "[] => [[Id: g4, ClientId: sp-hr, PrincipalId: , ResourceId: graph, ConsentType: AllPrincipals, Scope: User.Read User.ReadBasic.All, CreatedDateTime: , LastModifiedDateTime: ]]"}]}]),
+        dynamic({"user": {"userPrincipalName": "dave@contoso.com", "ipAddress": "203.0.113.13"}})
+]
+| extend TimeGenerated = now() + Offset;
+let SigninLogs = datatable(Offset: timespan, UserPrincipalName: string, IPAddress: string, ResultType: string)
+[
+    -5d, "alice@contoso.com", "203.0.113.10", "0",
+    -2d, "alice@contoso.com", "203.0.113.10", "0",
+    -4d, "bob@contoso.com",   "203.0.113.11", "0",
+    -3d, "carol@contoso.com", "203.0.113.12", "0",
+    -6d, "dave@contoso.com",  "203.0.113.13", "0"
+]
+| extend TimeGenerated = now() + Offset;

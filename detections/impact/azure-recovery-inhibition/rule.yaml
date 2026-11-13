@@ -1,0 +1,139 @@
+id: 59e5f871-32b2-469f-9994-04741159814e
+name: Azure backups, locks or recovery data removed, then resources deleted
+description: |
+  Before destroying or ransoming a cloud estate, attackers first remove whatever would let the owner
+  recover: backup items, vault soft delete, resource locks, restore points, soft-deleted Key Vaults,
+  diagnostic settings. This rule keeps a lookup table of those control-plane operations and of plain
+  data deletion, weighs them per caller over six hours, and adds points when safeguards went first
+  and data followed, when the volume is high, or when the caller hasn't done anything like it before.
+  A routine teardown that touches no safeguard doesn't alert.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActivity
+    dataTypes:
+      - AzureActivity
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Impact
+  - DefenseEvasion
+relevantTechniques:
+  - T1490
+  - T1485
+  - T1562.008
+query: |
+  let lookback         = 1h;     // only alert while the caller is still active
+  let chainWindow      = 6h;     // safeguards removed and data deleted within this window count as one chain
+  let baselineDays     = 13d;
+  let scoreThreshold   = 6;
+  let highThreshold    = 9;
+  let massDeleteCount  = 20;     // distinct resources touched
+  let bulkSnapshots    = 10;     // this many snapshot / restore point deletions count as removing a safeguard
+  // Identities that tear down environments on purpose (IaC pipelines, decommissioning accounts), as in AzureActivity.Caller
+  let approvedCallers  = dynamic([]);
+  // Stage: Safeguard = lets you recover or stops deletion. Snapshot = a safeguard only in bulk. Data = the workload itself.
+  let ops = datatable(Operation: string, Stage: string, What: string, Weight: int)
+  [
+      "microsoft.recoveryservices/vaults/backupconfig/write",                                         "Safeguard", "Backup vault security settings changed (soft delete, MUA)", 3,
+      "microsoft.recoveryservices/vaults/backupfabrics/protectioncontainers/protecteditems/delete",   "Safeguard", "Backup item deleted", 4,
+      "microsoft.recoveryservices/vaults/backuppolicies/delete",                                      "Safeguard", "Backup policy deleted", 2,
+      "microsoft.recoveryservices/vaults/delete",                                                     "Safeguard", "Recovery Services vault deleted", 4,
+      "microsoft.dataprotection/backupvaults/backupinstances/delete",                                 "Safeguard", "Backup instance deleted", 4,
+      "microsoft.dataprotection/backupvaults/delete",                                                 "Safeguard", "Backup vault deleted", 4,
+      "microsoft.authorization/locks/delete",                                                         "Safeguard", "Resource lock removed", 3,
+      "microsoft.keyvault/locations/deletedvaults/purge/action",                                      "Safeguard", "Soft-deleted Key Vault purged", 4,
+      "microsoft.insights/diagnosticsettings/delete",                                                 "Safeguard", "Diagnostic setting deleted", 2,
+      "microsoft.compute/snapshots/delete",                                                           "Snapshot",  "Disk snapshot deleted", 1,
+      "microsoft.compute/restorepointcollections/delete",                                             "Snapshot",  "VM restore point collection deleted", 2,
+      "microsoft.compute/restorepointcollections/restorepoints/delete",                               "Snapshot",  "VM restore point deleted", 1,
+      "microsoft.resources/subscriptions/resourcegroups/delete",                                      "Data",      "Resource group deleted", 3,
+      "microsoft.storage/storageaccounts/delete",                                                     "Data",      "Storage account deleted", 2,
+      "microsoft.keyvault/vaults/delete",                                                             "Data",      "Key Vault deleted", 2,
+      "microsoft.sql/servers/delete",                                                                 "Data",      "SQL server deleted", 2,
+      "microsoft.sql/servers/databases/delete",                                                       "Data",      "SQL database deleted", 2,
+      "microsoft.documentdb/databaseaccounts/delete",                                                 "Data",      "Cosmos DB account deleted", 2,
+      "microsoft.dbforpostgresql/flexibleservers/delete",                                             "Data",      "PostgreSQL server deleted", 2,
+      "microsoft.compute/virtualmachines/delete",                                                     "Data",      "Virtual machine deleted", 1,
+      "microsoft.compute/disks/delete",                                                               "Data",      "Disk deleted", 1,
+      "microsoft.subscription/cancel/action",                                                         "Data",      "Subscription cancelled", 6
+  ];
+  let events = AzureActivity
+      | where TimeGenerated > ago(baselineDays + chainWindow)
+      | where ActivityStatusValue in~ ("Success", "Succeeded")
+      | extend Operation = tolower(OperationNameValue), Caller = tolower(Caller)
+      | lookup kind=inner ops on Operation
+      | where not(Caller in~ (approvedCallers));
+  // Callers who did any of this before the chain window
+  let knownCallers = toscalar(events
+      | where TimeGenerated <= ago(chainWindow)
+      | summarize make_set(Caller, 5000));
+  let window = events
+      | where TimeGenerated > ago(chainWindow);
+  // ===== 1. One line per caller and operation, so 50 deleted disks weigh the same as one =====
+  let perOp = window
+      | summarize Events = count(), First = min(TimeGenerated), Last = max(TimeGenerated)
+                  by Caller, Operation, Stage, What, Weight
+      | extend IsSafeguard = Stage == "Safeguard" or (Stage == "Snapshot" and Events >= bulkSnapshots);
+  let perCallerOps = perOp
+      | summarize OpScore          = sum(Weight),
+                  MaxWeight        = max(Weight),
+                  Actions          = make_list(strcat(What, " x", Events), 25),
+                  SafeguardActions = countif(IsSafeguard),
+                  DataActions      = countif(Stage == "Data"),
+                  FirstSafeguard   = minif(First, IsSafeguard),
+                  LastData         = maxif(Last, Stage == "Data")
+                  by Caller;
+  // ===== 2. Volume and spread per caller =====
+  let perCaller = window
+      | summarize FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated),
+                  ResourceCount = dcount(_ResourceId), Subscriptions = dcount(SubscriptionId),
+                  CallerIPs = make_set(CallerIpAddress, 10), SampleResources = make_set(_ResourceId, 15),
+                  SubscriptionIds = make_set(SubscriptionId, 10)
+                  by Caller;
+  // ===== 3. Score =====
+  perCallerOps
+  | join kind=inner perCaller on Caller
+  | where LastSeen > ago(lookback)
+  // Deleting workloads is daily business. Something that protects them has to be involved, or the subscription itself.
+  | where SafeguardActions > 0 or MaxWeight >= 6
+  | extend SafeguardsThenData = coalesce(SafeguardActions > 0 and DataActions > 0 and FirstSafeguard <= LastData, false),
+           MassDelete   = ResourceCount >= massDeleteCount,
+           MultiSub     = Subscriptions >= 2,
+           NewCaller    = not(coalesce(set_has_element(knownCallers, Caller), false))
+  | extend Score = OpScore + 3 * toint(SafeguardsThenData) + 2 * toint(MassDelete) + 2 * toint(NewCaller) + 1 * toint(MultiSub)
+  | extend Reasons = strcat_array(array_concat(
+        iff(SafeguardsThenData, dynamic(["Safeguards removed, then data deleted"]), dynamic([])),
+        iff(MassDelete,         dynamic(["Many resources touched"]), dynamic([])),
+        iff(NewCaller,          dynamic(["Caller hasn't done this in 13 days"]), dynamic([])),
+        iff(MultiSub,           dynamic(["More than one subscription"]), dynamic([]))), " | ")
+  | where Score >= scoreThreshold
+  | extend AlertSeverity  = iff(Score >= highThreshold, "High", "Medium"),
+           FirstCallerIP  = tostring(CallerIPs[0]),
+           FirstResource  = tostring(SampleResources[0])
+  | project AlertSeverity, FirstSeen, LastSeen, Caller, Score, OpScore, Reasons, Actions, SafeguardActions, DataActions,
+            ResourceCount, Subscriptions, SubscriptionIds, CallerIPs, FirstCallerIP, SampleResources, FirstResource
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Caller
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: FirstCallerIP
+  - entityType: AzureResource
+    fieldMappings:
+      - identifier: ResourceId
+        columnName: FirstResource
+customDetails:
+  Score: Score
+  Reasons: Reasons
+  ResourceCount: ResourceCount
+alertDetailsOverride:
+  alertDisplayNameFormat: "{{Caller}} removed Azure recovery safeguards (score {{Score}})"
+  alertDescriptionFormat: "Reasons: {{Reasons}}"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

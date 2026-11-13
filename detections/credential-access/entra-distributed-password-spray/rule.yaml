@@ -1,0 +1,124 @@
+id: ce4e881e-b82c-4a3c-824b-0bd3da652431
+name: Distributed password spray against Entra ID (many IPs, one tool)
+description: |
+  A spray spread over many IPs, each trying only a few accounts, never trips a per-IP threshold. This
+  rule ignores IPs that real users have signed in from, then groups the remaining failures over 24 hours
+  by what the attacker can't easily vary: the user agent of the spraying tool and the network (ASN) the
+  IPs belong to. A group with many IPs, many accounts and few tries per account, well above its own
+  daily baseline, is a spray. Accounts that one of those IPs then signed into are listed in the alert.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+relevantTechniques:
+  - T1110.003
+  - T1110.004
+query: |
+  let window          = 1d;      // slow sprays stay under hourly thresholds, so judge a full day
+  let lookback        = 1h;      // only alert while the group is still active
+  let baselineDays    = 13d;
+  let minIPs          = 10;
+  let minAccounts     = 25;
+  let maxAttemptsPerAccount = 3.0;   // above this it's brute force
+  let maxAccountsPerIP      = 5.0;   // above this the single-IP spray rule already covers it
+  let spikeFactor     = 3.0;         // accounts today vs the group's busiest baseline day
+  // 50126 wrong password, 50053 locked / smart lockout, 50034 user doesn't exist, 50055 expired password, 50056 no password
+  let failureCodes    = dynamic(["50126", "50053", "50034", "50055", "50056"]);
+  let signins = SigninLogs
+      | where TimeGenerated > ago(baselineDays + window)
+      | where ResultType == "0" or ResultType in (failureCodes)
+      | project TimeGenerated, User = tolower(UserPrincipalName), IPAddress, ASN = AutonomousSystemNumber,
+                UserAgent, AppDisplayName, ResultType, Country = Location;
+  // IPs somebody signed in from successfully before the window. Failures from these are people mistyping.
+  let knownIPs = signins
+      | where TimeGenerated <= ago(window) and ResultType == "0"
+      | distinct IPAddress;
+  // Every failure gets two group keys: the tool's user agent, and the network it came from
+  let failuresAll = signins
+      | where ResultType != "0"
+      | extend Keys = pack_array(strcat("UserAgent: ", iff(isempty(UserAgent), "(empty)", UserAgent)),
+                                 iff(isempty(ASN), "", strcat("ASN: ", ASN)))
+      | mv-expand ClusterKey = Keys to typeof(string)
+      | where isnotempty(ClusterKey);
+  let failures = failuresAll
+      | where TimeGenerated > ago(window)
+      | join kind=leftanti knownIPs on IPAddress;
+  // ===== 1. Groups that look like a spray =====
+  let clusters = failures
+      | summarize Attempts = count(), Accounts = dcount(User), IPs = dcount(IPAddress),
+                  ASNs = dcount(ASN), Countries = dcount(Country),
+                  UnknownAccounts = dcountif(User, ResultType == "50034"),
+                  LockedAccounts  = dcountif(User, ResultType == "50053"),
+                  FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated),
+                  SampleTargets = make_set(User, 25), SampleIPs = make_set(IPAddress, 25),
+                  Apps = make_set(AppDisplayName, 5), UserAgents = make_set(UserAgent, 5)
+                  by ClusterKey
+      | where IPs >= minIPs and Accounts >= minAccounts and LastSeen > ago(lookback)
+      | extend AttemptsPerAccount = round(todouble(Attempts) / Accounts, 2),
+               AccountsPerIP      = round(todouble(Accounts) / IPs, 2)
+      | where AttemptsPerAccount <= maxAttemptsPerAccount and AccountsPerIP <= maxAccountsPerIP;
+  let clusterKeys = toscalar(clusters | summarize make_set(ClusterKey, 1000));
+  // ===== 2. How many accounts the same group normally fails against per day =====
+  let baseline = failuresAll
+      | where TimeGenerated <= ago(window)
+      | where ClusterKey in (clusterKeys)
+      | summarize DayAccounts = dcount(User) by ClusterKey, Day = bin(TimeGenerated, 1d)
+      | summarize BaselineMaxAccounts = max(DayAccounts) by ClusterKey;
+  // ===== 3. Sign-ins that worked from an IP that had already failed against two or more accounts =====
+  let sprayIPs = failures
+      | summarize FailedAccounts = dcount(User), FirstFail = min(TimeGenerated) by IPAddress
+      | where FailedAccounts >= 2;
+  let clusterIPs = failures
+      | where ClusterKey in (clusterKeys)
+      | distinct ClusterKey, IPAddress;
+  let successes = signins
+      | where TimeGenerated > ago(window) and ResultType == "0"
+      | join kind=inner sprayIPs on IPAddress
+      | where TimeGenerated > FirstFail
+      | join kind=inner clusterIPs on IPAddress
+      | summarize SuccessfulAccounts = make_set(User, 50), SuccessIPs = make_set(IPAddress, 50) by ClusterKey;
+  // ===== 4. Combine =====
+  clusters
+  | join kind=leftouter baseline on ClusterKey
+  | join kind=leftouter successes on ClusterKey
+  | extend BaselineMaxAccounts = coalesce(BaselineMaxAccounts, 0)
+  | where Accounts >= spikeFactor * BaselineMaxAccounts
+  | extend SuccessCount = coalesce(array_length(SuccessfulAccounts), 0)
+  | extend PossibleCompromise = SuccessCount > 0,
+           ClusterType  = tostring(split(ClusterKey, ": ")[0]),
+           ClusterValue = substring(ClusterKey, indexof(ClusterKey, ": ") + 2)
+  | extend AlertSeverity = iff(PossibleCompromise, "High", "Medium"),
+           FirstSuccessIP = tostring(SuccessIPs[0]),
+           FirstSampleIP  = tostring(SampleIPs[0])
+  | project AlertSeverity, FirstSeen, LastSeen, ClusterType, ClusterValue, IPs, ASNs, Countries, Accounts, Attempts,
+            AttemptsPerAccount, AccountsPerIP, BaselineMaxAccounts, UnknownAccounts, LockedAccounts,
+            PossibleCompromise, SuccessCount, SuccessfulAccounts, SuccessIPs, FirstSuccessIP,
+            SampleTargets, SampleIPs, FirstSampleIP, Apps, UserAgents
+entityMappings:
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: FirstSuccessIP
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: FirstSampleIP
+customDetails:
+  ClusterType: ClusterType
+  ClusterValue: ClusterValue
+  IPs: IPs
+  Accounts: Accounts
+  PossibleCompromise: PossibleCompromise
+alertDetailsOverride:
+  alertDisplayNameFormat: "Distributed password spray: {{Accounts}} accounts from {{IPs}} IPs ({{ClusterType}})"
+  alertDescriptionFormat: "Grouped by {{ClusterType}}: {{ClusterValue}}"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

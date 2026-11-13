@@ -1,0 +1,144 @@
+id: 1ece25ff-2cd6-4cf9-9cf5-d6e7aaa81466
+name: Sign-in session used from a second network (AiTM / token replay)
+description: |
+  One Entra ID session shows up from two different networks (ASNs) within a day. After AiTM phishing
+  or cookie theft, the attacker replays the victim's session from their own infrastructure, so the
+  same SessionId appears from a network the user has never used, often in another country, minutes
+  after the first sign-in. The switch is scored on how new both networks are for the user, how fast
+  the country changed, whether a hosting provider is involved, whether the original network is still
+  using the session, and whether the user agent changed.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+      - AADNonInteractiveUserSignInLogs
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1557
+  - T1539
+  - T1550.004
+query: |
+  let lookback       = 1h;       // match the rule frequency
+  let sessionWindow  = 1d;       // how far back a session can have started
+  let baselineDays   = 13d;
+  let fastSwitch     = 2h;       // a country change inside one session faster than this isn't travel
+  let scoreThreshold = 5;
+  let highThreshold  = 7;
+  // ASNs (as strings) of your corporate egress, VPN and secure web gateway. Sign-ins from them are ignored,
+  // otherwise every VPN connect looks like a network switch.
+  let trustedASNs    = dynamic([]);
+  // Hosting providers that phishing kits and replay tooling commonly run on:
+  // DigitalOcean, OVH, Hetzner, Vultr, Linode, M247, Contabo, Amazon, Google Cloud, Alibaba
+  let hostingASNs    = dynamic(["14061", "16276", "24940", "20473", "63949", "9009", "51167", "16509", "14618", "396982", "45102"]);
+  let sensitiveApps  = dynamic(["OfficeHome", "One Outlook Web", "Office 365 Exchange Online", "Azure Portal", "My Signins",
+                                "My Profile", "Microsoft Authentication Broker", "Microsoft Azure CLI", "Microsoft Azure PowerShell"]);
+  // ===== 1. Successful sign-ins, interactive and token refreshes =====
+  let signins = union isfuzzy=true
+      (SigninLogs
+          | where TimeGenerated > ago(baselineDays + sessionWindow)
+          | where ResultType == "0"
+          | project TimeGenerated, User = tolower(UserPrincipalName), SessionId, IPAddress,
+                    ASN = AutonomousSystemNumber, Country = Location, UserAgent, AppDisplayName),
+      (AADNonInteractiveUserSignInLogs
+          | where TimeGenerated > ago(baselineDays + sessionWindow)
+          | where ResultType == "0"
+          | project TimeGenerated, User = tolower(UserPrincipalName), SessionId, IPAddress,
+                    ASN = AutonomousSystemNumber, Country = Location, UserAgent, AppDisplayName)
+      | where isnotempty(ASN) and not(ASN in (trustedASNs));
+  let recent = signins
+      | where TimeGenerated > ago(sessionWindow) and isnotempty(SessionId);
+  // ===== 2. Sessions seen from more than one ASN, and where each one started =====
+  let sessions = recent
+      | summarize arg_min(TimeGenerated, ASN, Country, IPAddress, UserAgent, AppDisplayName), AsnCount = dcount(ASN) by User, SessionId
+      | where AsnCount > 1
+      | project User, SessionId, FirstTime = TimeGenerated, FirstASN = ASN, FirstCountry = Country,
+                FirstIP = IPAddress, FirstUA = UserAgent, FirstApp = AppDisplayName;
+  let candidateUsers = toscalar(sessions | summarize make_set(User, 10000));
+  // ===== 3. The first sign-in from a different ASN. Alert once, in the run where it first appears. =====
+  let second = recent
+      | join kind=inner sessions on User, SessionId
+      | where ASN != FirstASN
+      | summarize arg_min(TimeGenerated, ASN, Country, IPAddress, UserAgent, AppDisplayName),
+                  OtherASNs = make_set(ASN, 10), OtherIPs = make_set(IPAddress, 20), OtherApps = make_set(AppDisplayName, 10)
+                  by User, SessionId, FirstTime, FirstASN, FirstCountry, FirstIP, FirstUA, FirstApp
+      | project-rename SecondTime = TimeGenerated, SecondASN = ASN, SecondCountry = Country,
+                       SecondIP = IPAddress, SecondUA = UserAgent, SecondApp = AppDisplayName
+      | where SecondTime > ago(lookback);
+  // ===== 4. What the original network did around the switch =====
+  let firstSide = recent
+      | join kind=inner (second | project User, SessionId, FirstASN, SecondTime) on User, SessionId
+      | where ASN == FirstASN
+      | summarize LastFirstBefore = maxif(TimeGenerated, TimeGenerated <= SecondTime),
+                  FirstAsnAfter   = countif(TimeGenerated > SecondTime)
+                  by User, SessionId;
+  // ===== 5. Networks and countries the user worked from before the session window =====
+  let baseline = signins
+      | where TimeGenerated <= ago(sessionWindow)
+      | where User in (candidateUsers)
+      | summarize KnownASNs = make_set(ASN, 200), KnownCountries = make_set(Country, 50) by User;
+  // ===== 6. Score =====
+  second
+  | join kind=leftouter firstSide on User, SessionId
+  | join kind=leftouter baseline on User
+  | extend KnownASNs      = iff(isnull(KnownASNs), dynamic([]), KnownASNs),
+           KnownCountries = iff(isnull(KnownCountries), dynamic([]), KnownCountries)
+  | extend HasBaseline = array_length(KnownASNs) > 0,
+           SwitchGap   = SecondTime - coalesce(LastFirstBefore, FirstTime),
+           CountryChanged = isnotempty(FirstCountry) and isnotempty(SecondCountry) and FirstCountry != SecondCountry
+  | extend SecondAsnNew  = HasBaseline and not(set_has_element(KnownASNs, SecondASN)),
+           FirstAsnNew   = HasBaseline and not(set_has_element(KnownASNs, FirstASN)),
+           CountryNew    = CountryChanged and not(set_has_element(KnownCountries, SecondCountry)),
+           FastCountry   = CountryChanged and SwitchGap < fastSwitch,
+           Hosting       = SecondASN in (hostingASNs) or FirstASN in (hostingASNs),
+           Interleaved   = coalesce(FirstAsnAfter, 0) > 0,
+           AgentChanged  = isnotempty(FirstUA) and isnotempty(SecondUA) and FirstUA != SecondUA,
+           SensitiveApp  = SecondApp in~ (sensitiveApps)
+  | extend Score = 2 * toint(SecondAsnNew) + 2 * toint(FastCountry) + 2 * toint(Hosting) + 2 * toint(Interleaved)
+                 + 1 * toint(FirstAsnNew) + 1 * toint(CountryNew) + 1 * toint(AgentChanged) + 1 * toint(SensitiveApp)
+  | extend Reasons = strcat_array(array_concat(
+        iff(SecondAsnNew, dynamic(["Second network is new for the user"]), dynamic([])),
+        iff(FastCountry,  dynamic(["Country changed faster than travel allows"]), dynamic([])),
+        iff(Hosting,      dynamic(["Hosting provider network"]), dynamic([])),
+        iff(Interleaved,  dynamic(["Original network kept using the session afterwards"]), dynamic([])),
+        iff(FirstAsnNew,  dynamic(["Session also started on a network new for the user"]), dynamic([])),
+        iff(CountryNew,   dynamic(["Country is new for the user"]), dynamic([])),
+        iff(AgentChanged, dynamic(["User agent changed"]), dynamic([])),
+        iff(SensitiveApp, dynamic(["Second network went to mail, portal or security info"]), dynamic([]))), " | ")
+  | where Score >= scoreThreshold
+  // A personal VPN switched on mid-session scores like a replay. High needs a sign the client itself changed.
+  | extend AlertSeverity = iff(Score >= highThreshold and (AgentChanged or FirstAsnNew), "High", "Medium"),
+           SwitchMinutes = toint(SwitchGap / 1m)
+  | project AlertSeverity, SecondTime, User, Score, Reasons, SessionId, SwitchMinutes,
+            FirstTime, FirstIP, FirstASN, FirstCountry, FirstApp, FirstUA,
+            SecondIP, SecondASN, SecondCountry, SecondApp, SecondUA, OtherASNs, OtherIPs, OtherApps
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: User
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SecondIP
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: FirstIP
+customDetails:
+  Score: Score
+  Reasons: Reasons
+  SessionId: SessionId
+  SwitchMinutes: SwitchMinutes
+alertDetailsOverride:
+  alertDisplayNameFormat: "Session of {{User}} replayed from {{SecondCountry}} (score {{Score}})"
+  alertDescriptionFormat: "Reasons: {{Reasons}}"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

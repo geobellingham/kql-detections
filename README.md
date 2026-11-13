@@ -23,6 +23,11 @@ The rules are based on problems that come up in day-to-day SOC work: noisy rules
 | [Encoded PowerShell cradle](detections/execution/encoded-powershell-download-cradle/) | DeviceProcessEvents | T1059.001, T1027.010 | Decodes `-EncodedCommand` in the query and looks for download and IEX methods |
 | [AWS logging tampering](detections/defense-evasion/aws-logging-tampering/) | AWSCloudTrail | T1562.008 | Lookup table of logging-related API calls with impact levels |
 | [AWS IAM privilege escalation](detections/privilege-escalation/aws-iam-privilege-escalation/) | AWSCloudTrail | T1098.001, T1098.003 | Decodes policy documents and flags keys created for a different user |
+| [OAuth consent to a risky app](detections/credential-access/oauth-illicit-consent/) | AuditLogs + SigninLogs | T1528, T1098 | Scores each consent on the scopes granted, how new the app is, who consented and whether Microsoft flagged it |
+| [Session replay (AiTM / token theft)](detections/credential-access/aitm-session-replay/) | SigninLogs + AADNonInteractiveUserSignInLogs | T1557, T1539, T1550.004 | One SessionId seen from two ASNs, scored on how new both networks are, country change speed and hosting providers |
+| [Distributed password spray](detections/credential-access/entra-distributed-password-spray/) | SigninLogs | T1110.003, T1110.004 | Ignores IPs real users sign in from, then groups failures by user agent and ASN over 24 hours |
+| [Privileged role outside PIM](detections/privilege-escalation/entra-role-assigned-outside-pim/) | AuditLogs | T1098.003, T1136.003 | Direct or permanent role assignments, scored on role tier, target type, account age and who assigned it |
+| [Azure recovery inhibition](detections/impact/azure-recovery-inhibition/) | AzureActivity | T1490, T1485, T1562.008 | Lookup table of backup, lock and deletion operations, weighed per caller, with extra points when safeguards go first |
 
 ### AI threats
 
@@ -93,11 +98,10 @@ Before turning a rule on, set the values at the top of the query for your enviro
 
 - Run the sample data tests in CI on a Kusto emulator (Kustainer) and check the `EXPECT` row counts
 - Sample data tests for the first 13 detections
-- Distributed password spray, grouped by user agent or ASN
-- AiTM session theft: token replay from a new ASN right after MFA
 - LSASS access through `OpenProcessApiCall`, which doesn't need a command line
 - AWS escalation paths that use `PassRole`
-- OAuth illicit consent grants
+- Eligible PIM assignments from an unexpected assigner
+- Data-plane destruction in Azure Storage (blob and container deletes)
 
 ## License
 

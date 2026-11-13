@@ -1,0 +1,54 @@
+// Test fixture: entra-role-assigned-outside-pim
+// EXPECT: exactly 2 rows
+//   Global Administrator -> svc-backup2@contoso.com by mallory@contoso.com: AlertSeverity High, Score 8
+//       (tier-0 3, direct 2, target created in the last 7 days 2, new assigner 1)
+//       The directory event and the PIM "outside of PIM" event are merged into this one row.
+//   Application Administrator -> reporting-app (ServicePrincipal) by admin.kim@contoso.com: AlertSeverity High, Score 7
+//       (tier-0 3, direct 2, target is a service principal 2)
+// Should not appear:
+//   - admin.kim activating Global Administrator through PIM (written by the MS-PIM service principal)
+//   - Helpdesk Administrator made permanent through PIM by a known assigner (score 2)
+//   - the User Administrator assignment from 6 days ago (it only feeds the assigner baseline)
+let AuditLogs = datatable(Offset: timespan, OperationName: string, Result: string, Category: string,
+                          TargetResources: dynamic, InitiatedBy: dynamic)
+[
+    // Baseline: admin.kim assigns roles now and then
+    -6d, "Add member to role", "success", "RoleManagement",
+        dynamic([{"type": "User", "id": "u-lee", "displayName": "Lee", "userPrincipalName": "lee@contoso.com",
+                  "modifiedProperties": [{"displayName": "Role.DisplayName", "newValue": "User Administrator"}]},
+                 {"type": "Role", "id": "r-ua"}]),
+        dynamic({"user": {"userPrincipalName": "admin.kim@contoso.com", "ipAddress": "203.0.113.10"}}),
+    // mallory creates an account, then makes it Global Administrator directly
+    -2h, "Add user", "success", "UserManagement",
+        dynamic([{"type": "User", "id": "u-new", "displayName": "svc-backup2", "userPrincipalName": "svc-backup2@contoso.com"}]),
+        dynamic({"user": {"userPrincipalName": "mallory@contoso.com", "ipAddress": "185.220.101.7"}}),
+    -30m, "Add member to role", "success", "RoleManagement",
+        dynamic([{"type": "User", "id": "u-new", "displayName": "svc-backup2", "userPrincipalName": "svc-backup2@contoso.com",
+                  "modifiedProperties": [{"displayName": "Role.DisplayName", "newValue": "\"Global Administrator\""}]},
+                 {"type": "Role", "id": "r-ga"}]),
+        dynamic({"user": {"userPrincipalName": "mallory@contoso.com", "ipAddress": "185.220.101.7"}}),
+    -30m, "Add member to role outside of PIM (permanent)", "success", "RoleManagement",
+        dynamic([{"type": "Role", "id": "r-ga", "displayName": "Global Administrator"},
+                 {"type": "Request", "id": "req-1"},
+                 {"type": "User", "id": "u-new", "displayName": "svc-backup2", "userPrincipalName": "svc-backup2@contoso.com"}]),
+        dynamic({"user": {"userPrincipalName": "mallory@contoso.com", "ipAddress": "185.220.101.7"}}),
+    // admin.kim activates her own eligible role: PIM writes the membership
+    -20m, "Add member to role", "success", "RoleManagement",
+        dynamic([{"type": "User", "id": "u-kim", "displayName": "Kim", "userPrincipalName": "admin.kim@contoso.com",
+                  "modifiedProperties": [{"displayName": "Role.DisplayName", "newValue": "Global Administrator"}]},
+                 {"type": "Role", "id": "r-ga"}]),
+        dynamic({"app": {"displayName": "MS-PIM"}}),
+    // A lower-tier role made permanent through PIM
+    -15m, "Add member to role in PIM completed (permanent)", "success", "RoleManagement",
+        dynamic([{"type": "Role", "id": "r-hd", "displayName": "Helpdesk Administrator"},
+                 {"type": "Request", "id": "req-2"},
+                 {"type": "User", "id": "u-lee", "displayName": "Lee", "userPrincipalName": "lee@contoso.com"}]),
+        dynamic({"user": {"userPrincipalName": "admin.kim@contoso.com", "ipAddress": "203.0.113.10"}}),
+    // An application gets a tier-0 role directly
+    -10m, "Add member to role", "success", "RoleManagement",
+        dynamic([{"type": "ServicePrincipal", "id": "sp-report", "displayName": "reporting-app",
+                  "modifiedProperties": [{"displayName": "Role.DisplayName", "newValue": "Application Administrator"}]},
+                 {"type": "Role", "id": "r-aa"}]),
+        dynamic({"user": {"userPrincipalName": "admin.kim@contoso.com", "ipAddress": "203.0.113.10"}})
+]
+| extend TimeGenerated = now() + Offset;

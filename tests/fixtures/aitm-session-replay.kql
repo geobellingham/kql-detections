@@ -1,0 +1,39 @@
+// Test fixture: aitm-session-replay
+// EXPECT: exactly 1 row
+//   dana@contoso.com, SessionId s-aitm: AlertSeverity High, Score 10, SwitchMinutes 5
+//       FirstASN 14061 (NL) -> SecondASN 9009 (RO)
+//       (second network new 2, fast country change 2, hosting 2, first network new 1, new country 1,
+//        user agent changed 1, sensitive app 1)
+// Should not appear:
+//   - erin: session moves from home broadband to her mobile carrier, both in her baseline (score 0)
+//   - frank: travelling. Same session shows up in a new country 19 hours later with the same browser (score 4)
+let chromeWin = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+let firefoxLinux = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
+let SigninLogs = datatable(Offset: timespan, UserPrincipalName: string, ResultType: string, SessionId: string, IPAddress: string,
+                           AutonomousSystemNumber: string, Location: string, AppDisplayName: string, Agent: string)
+[
+    // dana: baseline from her home ISP, then today's sign-in lands on a phishing proxy at a hosting provider
+    -5d,  "dana@contoso.com",  "0", "s-d0",    "87.123.4.5",    "3320",  "DE", "Microsoft Teams", "chrome",
+    -3d,  "dana@contoso.com",  "0", "s-d1",    "87.123.4.5",    "3320",  "DE", "Microsoft Teams", "chrome",
+    -40m, "dana@contoso.com",  "0", "s-aitm",  "164.92.10.5",   "14061", "NL", "OfficeHome",      "chrome",
+    // erin: home broadband
+    -4d,  "erin@contoso.com",  "0", "s-e0",    "91.20.30.40",   "3320",  "DE", "Microsoft Teams", "chrome",
+    -50m, "erin@contoso.com",  "0", "s-erin",  "91.20.30.40",   "3320",  "DE", "Microsoft Teams", "chrome",
+    // frank: at home yesterday evening
+    -5d,  "frank@contoso.com", "0", "s-f0",    "84.150.1.2",    "3320",  "DE", "One Outlook Web", "chrome",
+    -20h, "frank@contoso.com", "0", "s-frank", "84.150.1.2",    "3320",  "DE", "One Outlook Web", "chrome"
+]
+| extend TimeGenerated = now() + Offset, UserAgent = iff(Agent == "chrome", chromeWin, firefoxLinux);
+let AADNonInteractiveUserSignInLogs = datatable(Offset: timespan, UserPrincipalName: string, ResultType: string, SessionId: string, IPAddress: string,
+                                                AutonomousSystemNumber: string, Location: string, AppDisplayName: string, Agent: string)
+[
+    // dana: five minutes later the same session reads mail from another hosting network, different browser
+    -35m, "dana@contoso.com",  "0", "s-aitm",  "185.156.46.20", "9009",  "RO", "Office 365 Exchange Online", "firefox",
+    -20m, "dana@contoso.com",  "0", "s-aitm",  "185.156.46.20", "9009",  "RO", "Office 365 Exchange Online", "firefox",
+    // erin: her phone on the mobile carrier, seen last week too
+    -6d,  "erin@contoso.com",  "0", "s-e0",    "80.187.5.6",    "3209",  "DE", "Microsoft Teams", "chrome",
+    -30m, "erin@contoso.com",  "0", "s-erin",  "80.187.5.6",    "3209",  "DE", "Microsoft Teams", "chrome",
+    // frank: hotel wifi in Spain this morning
+    -30m, "frank@contoso.com", "0", "s-frank", "95.60.7.8",     "12430", "ES", "One Outlook Web", "chrome"
+]
+| extend TimeGenerated = now() + Offset, UserAgent = iff(Agent == "chrome", chromeWin, firefoxLinux);

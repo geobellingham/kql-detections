@@ -107,5 +107,34 @@ for ip, want in [("203.0.113.45", "203.0.113"), ("203.0.113.***", "203.0.113")]:
     if not got or got.group(1) != want:
         failures += 1; print(f"FAIL ip prefix for {ip}")
 
+# ---- oauth-illicit-consent ----
+p = kql_patterns("detections/credential-access/oauth-illicit-consent/rule.yaml")
+check("lure+", p["lureNamePattern"], [
+    "OneDrive Document Viewer",
+    "Secure Mail Upgrade",
+    "DocuSign e-Signature",
+    "Voicemail Player",
+    "Office365 Login",
+    "Office 365 Backup",
+    "Account Verification",
+    "MFA Enrollment",
+], True)
+check("lure-", p["lureNamePattern"], [
+    "Contoso Travel",
+    "Contoso HR Portal",
+    "Zoom",
+    "Slack",
+    "Grammarly",
+    "Calendly",
+], False)
+# Scope extraction: only the new side of "old => new" counts, and every grant's scopes are collected
+perm = ("[[Id: g0, ConsentType: Principal, Scope: User.Read, CreatedDateTime: ]] => "
+        "[[Id: g0, ConsentType: Principal, Scope: User.Read Mail.Read offline_access, CreatedDateTime: ], "
+        "[Id: g1, ConsentType: Principal, Scope: Files.ReadWrite.All, CreatedDateTime: ]]")
+granted = re.search(r"(?s)=>(.*)", perm).group(1)
+scopes = " ".join(re.findall(r"scope:\s*([^,\]]+)", granted.lower())).split()
+if scopes != ["user.read", "mail.read", "offline_access", "files.readwrite.all"]:
+    failures += 1; print(f"FAIL consent scope extraction: {scopes}")
+
 print("regex tests:", "FAILED" if failures else "all passed", f"({failures} failures)")
 sys.exit(1 if failures else 0)

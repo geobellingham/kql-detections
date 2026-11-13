@@ -1,0 +1,36 @@
+// Test fixture: azure-recovery-inhibition
+// EXPECT: exactly 1 row
+//   Caller = mallory@contoso.com, AlertSeverity High, Score 18, OpScore 13
+//       SafeguardActions 3 (vault settings, backup items, lock), DataActions 2 (storage account, VMs), ResourceCount 7
+//       Reasons: Safeguards removed, then data deleted | Caller hasn't done this in 13 days
+// Should not appear:
+//   - deploy-pipeline: tears down a resource group with a VM, a disk and one snapshot. No safeguard involved.
+//   - admin.kim: deletes one backup policy (2) as a first-time caller (2), under the threshold of 6
+//   - mallory's "Start" event for the vault settings change: only completed operations count
+let sub  = "00000000-0000-0000-0000-000000000001";
+let rg   = strcat("/subscriptions/", sub, "/resourcegroups/rg-prod");
+let dev  = strcat("/subscriptions/", sub, "/resourcegroups/rg-dev");
+let AzureActivity = datatable(Offset: timespan, OperationNameValue: string, ActivityStatusValue: string,
+                              Resource: string, Caller: string, CallerIpAddress: string)
+[
+    // mallory: turn off the vault's soft delete, delete the backups, drop the lock, then delete the workload
+    -3h,     "MICROSOFT.RECOVERYSERVICES/VAULTS/BACKUPCONFIG/WRITE", "Start",   "prod|/providers/microsoft.recoveryservices/vaults/rsv-prod/backupconfig/vaultconfig", "Mallory@contoso.com", "185.220.101.7",
+    -3h,     "MICROSOFT.RECOVERYSERVICES/VAULTS/BACKUPCONFIG/WRITE", "Success", "prod|/providers/microsoft.recoveryservices/vaults/rsv-prod/backupconfig/vaultconfig", "Mallory@contoso.com", "185.220.101.7",
+    -170m,   "MICROSOFT.RECOVERYSERVICES/VAULTS/BACKUPFABRICS/PROTECTIONCONTAINERS/PROTECTEDITEMS/DELETE", "Success", "prod|/providers/microsoft.recoveryservices/vaults/rsv-prod/backupfabrics/azure/protectioncontainers/c1/protecteditems/vm-app1", "Mallory@contoso.com", "185.220.101.7",
+    -169m,   "MICROSOFT.RECOVERYSERVICES/VAULTS/BACKUPFABRICS/PROTECTIONCONTAINERS/PROTECTEDITEMS/DELETE", "Success", "prod|/providers/microsoft.recoveryservices/vaults/rsv-prod/backupfabrics/azure/protectioncontainers/c1/protecteditems/vm-app2", "Mallory@contoso.com", "185.220.101.7",
+    -40m,    "MICROSOFT.AUTHORIZATION/LOCKS/DELETE",                 "Success", "prod|/providers/microsoft.authorization/locks/do-not-delete", "mallory@contoso.com", "185.220.101.7",
+    -30m,    "MICROSOFT.STORAGE/STORAGEACCOUNTS/DELETE",             "Success", "prod|/providers/microsoft.storage/storageaccounts/stprodarchive", "mallory@contoso.com", "185.220.101.7",
+    -25m,    "MICROSOFT.COMPUTE/VIRTUALMACHINES/DELETE",             "Success", "prod|/providers/microsoft.compute/virtualmachines/vm-app1", "mallory@contoso.com", "185.220.101.7",
+    -24m,    "MICROSOFT.COMPUTE/VIRTUALMACHINES/DELETE",             "Success", "prod|/providers/microsoft.compute/virtualmachines/vm-app2", "mallory@contoso.com", "185.220.101.7",
+    // deploy-pipeline: tore down a dev environment last week and does it again today
+    -5d,     "MICROSOFT.RESOURCES/SUBSCRIPTIONS/RESOURCEGROUPS/DELETE", "Success", "dev|", "deploy-pipeline@contoso.com", "52.10.20.5",
+    -30m,    "MICROSOFT.RESOURCES/SUBSCRIPTIONS/RESOURCEGROUPS/DELETE", "Success", "dev|", "deploy-pipeline@contoso.com", "52.10.20.5",
+    -29m,    "MICROSOFT.COMPUTE/VIRTUALMACHINES/DELETE",             "Success", "dev|/providers/microsoft.compute/virtualmachines/vm-test", "deploy-pipeline@contoso.com", "52.10.20.5",
+    -29m,    "MICROSOFT.COMPUTE/DISKS/DELETE",                       "Success", "dev|/providers/microsoft.compute/disks/vm-test-os", "deploy-pipeline@contoso.com", "52.10.20.5",
+    -28m,    "MICROSOFT.COMPUTE/SNAPSHOTS/DELETE",                   "Success", "dev|/providers/microsoft.compute/snapshots/vm-test-snap", "deploy-pipeline@contoso.com", "52.10.20.5",
+    // admin.kim: tidies up one unused backup policy
+    -20m,    "MICROSOFT.RECOVERYSERVICES/VAULTS/BACKUPPOLICIES/DELETE", "Success", "prod|/providers/microsoft.recoveryservices/vaults/rsv-prod/backuppolicies/old-daily", "admin.kim@contoso.com", "203.0.113.10"
+]
+| extend TimeGenerated = now() + Offset,
+         SubscriptionId = sub,
+         _ResourceId = strcat(iff(Resource startswith "prod|", rg, dev), substring(Resource, indexof(Resource, "|") + 1));

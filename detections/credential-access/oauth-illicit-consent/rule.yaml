@@ -1,0 +1,150 @@
+id: c3eeb784-4b27-4722-9d66-06b8b5356254
+name: OAuth consent to a risky application (risk-scored)
+description: |
+  A user or admin grants an application access to mail, files or the directory. Consent phishing skips
+  the password and MFA entirely: the victim clicks Accept and the attacker's app gets a refresh token
+  that survives password resets. Each consent is scored on what was granted (mail, files, directory
+  write, offline access), how new the app is in the tenant, who consented and from where, and whether
+  Microsoft flagged or blocked it as risky. The alert lists the reasons and the risky scopes.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - Persistence
+relevantTechniques:
+  - T1528
+  - T1098
+query: |
+  let lookback        = 1h;       // match the rule frequency
+  let baselineDays    = 13d;
+  let newAppWindow    = 7d;       // an app is "new" if its service principal appeared in the tenant this recently
+  let scoreThreshold  = 5;
+  let highThreshold   = 8;
+  // Apps you've reviewed: display names or service principal object IDs
+  let allowedApps     = dynamic([]);
+  let mailScopes      = dynamic(["mail.read", "mail.readwrite", "mail.send", "mail.read.shared", "mail.readwrite.shared",
+                                 "mailboxsettings.readwrite", "imap.accessasuser.all", "ews.accessasuser.all", "full_access_as_user"]);
+  let fileScopes      = dynamic(["files.read.all", "files.readwrite.all", "sites.read.all", "sites.readwrite.all",
+                                 "sites.fullcontrol.all", "notes.read.all", "chat.read", "chat.readwrite"]);
+  let directoryScopes = dynamic(["directory.readwrite.all", "user.readwrite.all", "group.readwrite.all", "application.readwrite.all",
+                                 "approleassignment.readwrite.all", "rolemanagement.readwrite.directory", "directory.accessasuser.all"]);
+  // Names that consent-phishing apps borrow. Checked against the lower-cased app name.
+  let lureNamePattern = @"(microsoft|office ?365|o365|outlook|onedrive|sharepoint|adobe|docusign|dropbox|secur|upgrade|verif|voicemail|invoice|payroll|mfa)";
+  // ===== 1. Consents in this run =====
+  let consents = AuditLogs
+      | where TimeGenerated > ago(lookback)
+      | where OperationName == "Consent to application"
+      // Consents stopped by Microsoft's risk-based step-up are logged as failures. The user still clicked Accept.
+      | where Result =~ "success" or ResultReason contains "risky"
+      | extend AppName     = tostring(TargetResources[0].displayName),
+               AppObjectId = tolower(tostring(TargetResources[0].id)),
+               User        = tolower(tostring(InitiatedBy.user.userPrincipalName)),
+               UserIP      = tostring(InitiatedBy.user.ipAddress),
+               Props       = TargetResources[0].modifiedProperties
+      | where not(AppName in~ (allowedApps)) and not(AppObjectId in~ (allowedApps))
+      // mv-apply drops rows with an empty array, so give it a placeholder to keep the event
+      | mv-apply P = iff(array_length(Props) > 0, Props, dynamic([{"displayName": "none"}])) on (
+          summarize PropBag = make_bag(bag_pack(tostring(P.displayName), tostring(P.newValue))))
+      | extend Permissions = tostring(PropBag["ConsentAction.Permissions"])
+      // The value reads "old grants => new grants". Only the new side matters.
+      | extend Granted = iff(Permissions contains "=>", extract(@"(?s)=>(.*)", 1, Permissions), Permissions)
+      | extend ScopeList = split(trim(@"\s+", strcat_array(extract_all(@"scope:\s*([^,\]]+)", tolower(Granted)), " ")), " ")
+      // One consent is logged once per resource API (Graph, Exchange...). Merge them per user and app.
+      | mv-expand Scope = ScopeList to typeof(string)
+      | summarize FirstSeen     = min(TimeGenerated),
+                  Scopes        = make_set_if(Scope, isnotempty(Scope), 200),
+                  AdminConsent  = countif(tostring(PropBag["ConsentContext.IsAdminConsent"]) has "true") > 0,
+                  OnBehalfOfAll = countif(tostring(PropBag["ConsentContext.OnBehalfOfAll"]) has "true") > 0,
+                  RiskyFlag     = countif(tostring(PropBag["ConsentAction.Reason"]) contains "risky" or ResultReason contains "risky") > 0,
+                  Blocked       = countif(Result !~ "success") > 0,
+                  UserIP        = max(UserIP),
+                  AppName       = max(AppName)
+                  by User, AppObjectId;
+  let appIds = toscalar(consents | summarize make_set(AppObjectId, 1000));
+  let users  = toscalar(consents | summarize make_set(User, 1000));
+  // ===== 2. When the app first appeared, and who else consented to it =====
+  let appHistory = AuditLogs
+      | where TimeGenerated > ago(baselineDays + lookback)
+      | where OperationName in ("Add service principal", "Consent to application") and Result =~ "success"
+      | extend AppObjectId = tolower(tostring(TargetResources[0].id)),
+               Consenter   = tolower(tostring(InitiatedBy.user.userPrincipalName))
+      | where AppObjectId in (appIds)
+      | summarize SpCreated       = minif(TimeGenerated, OperationName == "Add service principal"),
+                  PriorConsenters = dcountif(Consenter, OperationName == "Consent to application" and TimeGenerated <= ago(lookback))
+                  by AppObjectId;
+  // ===== 3. IPs the consenting user normally signs in from =====
+  let knownIPs = SigninLogs
+      | where TimeGenerated between (ago(baselineDays + lookback) .. ago(lookback))
+      | where ResultType == "0"
+      | extend User = tolower(UserPrincipalName)
+      | where User in (users)
+      | summarize KnownIPs = make_set(IPAddress, 1000) by User;
+  // ===== 4. Score =====
+  consents
+  | join kind=leftouter appHistory on AppObjectId
+  | join kind=leftouter knownIPs on User
+  | extend MailHits = set_intersect(Scopes, mailScopes),
+           FileHits = set_intersect(Scopes, fileScopes),
+           DirHits  = set_intersect(Scopes, directoryScopes)
+  | extend MailAccess = array_length(MailHits) > 0,
+           FileAccess = array_length(FileHits) > 0,
+           DirWrite   = array_length(DirHits) > 0
+  | extend DataScopes = MailAccess or FileAccess or DirWrite
+  | extend Offline     = DataScopes and set_has_element(Scopes, "offline_access"),
+           NewInTenant = isnotnull(SpCreated) and SpCreated > FirstSeen - newAppWindow,
+           UserConsent = DataScopes and not(AdminConsent),
+           TenantWide  = DataScopes and OnBehalfOfAll,
+           LureName    = tolower(AppName) matches regex lureNamePattern,
+           NewIP       = coalesce(isnotempty(UserIP) and array_length(KnownIPs) > 0 and not(set_has_element(KnownIPs, UserIP)), false)
+  | extend Score = 5 * toint(RiskyFlag) + 3 * toint(DirWrite) + 2 * toint(MailAccess) + 2 * toint(FileAccess)
+                 + 2 * toint(NewInTenant) + 2 * toint(TenantWide)
+                 + 1 * toint(Offline) + 1 * toint(UserConsent) + 1 * toint(LureName) + 1 * toint(NewIP)
+  | extend Reasons = strcat_array(array_concat(
+        iff(RiskyFlag,   dynamic(["Microsoft flagged or blocked the consent as risky"]), dynamic([])),
+        iff(DirWrite,    dynamic(["Directory write scopes"]), dynamic([])),
+        iff(MailAccess,  dynamic(["Mail scopes"]), dynamic([])),
+        iff(FileAccess,  dynamic(["File, site or chat scopes"]), dynamic([])),
+        iff(NewInTenant, dynamic(["App is new in the tenant"]), dynamic([])),
+        iff(TenantWide,  dynamic(["Granted for all users"]), dynamic([])),
+        iff(Offline,     dynamic(["offline_access (refresh token)"]), dynamic([])),
+        iff(UserConsent, dynamic(["Consented by a user, not an admin"]), dynamic([])),
+        iff(LureName,    dynamic(["App name imitates a known brand or lure"]), dynamic([])),
+        iff(NewIP,       dynamic(["Consent from an IP the user hasn't signed in from"]), dynamic([]))), " | ")
+  | where Score >= scoreThreshold
+  | extend AlertSeverity = iff(Score >= highThreshold, "High", "Medium"),
+           RiskyScopes   = array_concat(MailHits, FileHits, DirHits),
+           PriorConsenters = coalesce(PriorConsenters, 0)
+  | project AlertSeverity, FirstSeen, User, UserIP, AppName, AppObjectId, Score, Reasons, RiskyScopes, Scopes,
+            AdminConsent, OnBehalfOfAll, Blocked, SpCreated, PriorConsenters
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: User
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: UserIP
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: Name
+        columnName: AppName
+customDetails:
+  Score: Score
+  Reasons: Reasons
+  AppObjectId: AppObjectId
+  Blocked: Blocked
+alertDetailsOverride:
+  alertDisplayNameFormat: "Risky OAuth consent: {{User}} granted access to {{AppName}} (score {{Score}})"
+  alertDescriptionFormat: "Reasons: {{Reasons}}"
+  alertSeverityColumnName: AlertSeverity
+version: 1.0.0
+kind: Scheduled

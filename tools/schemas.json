@@ -16,7 +16,9 @@
     "CorrelationId": "string",
     "ClientAppUsed": "string",
     "DeviceDetail": "dynamic",
-    "RiskLevelDuringSignIn": "string"
+    "RiskLevelDuringSignIn": "string",
+    "SessionId": "string",
+    "AutonomousSystemNumber": "string"
   },
   "AuditLogs": {
     "TimeGenerated": "datetime",
@@ -191,5 +193,18 @@
     "AdditionalFields": "dynamic",
     "AuditSource": "string",
     "OAuthAppId": "string"
+  },
+  "AADNonInteractiveUserSignInLogs": {
+    "TimeGenerated": "datetime",
+    "UserPrincipalName": "string",
+    "UserId": "string",
+    "IPAddress": "string",
+    "ResultType": "string",
+    "AppDisplayName": "string",
+    "UserAgent": "string",
+    "Location": "string",
+    "SessionId": "string",
+    "AutonomousSystemNumber": "string",
+    "CorrelationId": "string"
   }
 }
