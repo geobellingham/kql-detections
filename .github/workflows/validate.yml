@@ -23,3 +23,23 @@ jobs:
       - run: pip install pyyaml
       - name: Regex unit tests
         run: python3 tests/regex_test.py
+
+  fixtures:
+    runs-on: ubuntu-latest
+    services:
+      kusto:
+        image: mcr.microsoft.com/azuredataexplorer/kustainer-linux:latest
+        env:
+          ACCEPT_EULA: "Y"
+        ports:
+          - 8080:8080
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/package-lock.json
+      - run: npm ci --prefix tools
+      - name: Run every detection on its sample data (Kusto emulator)
+        run: node tools/run-fixtures.js

@@ -67,6 +67,8 @@ Every push runs [`tools/validate.js`](tools/validate.js) in GitHub Actions. It:
 2. Parses and binds every query with Microsoft's KQL parser ([`Kusto.Language`](https://github.com/microsoft/Kusto-Query-Language)) against the table schemas in [`tools/schemas.json`](tools/schemas.json). This catches syntax errors, misspelled columns and type errors before a rule gets near a workspace.
 3. For every detection with a file in [`tests/fixtures/`](tests/fixtures/), binds the rule against the sample tables in that file. This confirms the sample data has every column the rule needs. Each file says what result to expect in `// EXPECT:` lines.
 
+A second job starts the Kusto emulator ([Kustainer](https://learn.microsoft.com/azure/data-explorer/kusto-emulator-overview)) and runs every detection on its sample data with [`tools/run-fixtures.js`](tools/run-fixtures.js). It fails if the number of rows differs from the `EXPECT` line, and prints each result row in the job log.
+
 [`tests/regex_test.py`](tests/regex_test.py) tests the regexes used in the rules (credential paths, download and execute, inference API paths…) against examples that should and shouldn't match.
 
 ### Running a detection on sample data
@@ -96,7 +98,6 @@ Before turning a rule on, set the values at the top of the query for your enviro
 
 ## Roadmap
 
-- Run the sample data tests in CI on a Kusto emulator (Kustainer) and check the `EXPECT` row counts
 - Sample data tests for the first 13 detections
 - LSASS access through `OpenProcessApiCall`, which doesn't need a command line
 - AWS escalation paths that use `PassRole`
