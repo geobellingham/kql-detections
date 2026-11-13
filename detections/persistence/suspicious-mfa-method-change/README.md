@@ -38,6 +38,7 @@ The alert fires at a score of 4 or more and lists every signal that counted in `
 - The sign-in behind the change is the last successful sign-in in the hour before the first change. The latest sign-in overall is often the new Authenticator app signing in for the first time, which tells you nothing about who made the change.
 - The baseline is per user and ends where the earliest change starts, so the attacker's own sign-ins don't get counted as normal.
 - Every flag is wrapped in `coalesce`. Without that, a user with no baseline would get a null score and the alert would silently disappear. With it, they get +1 for "No baseline".
+- The query has almost no comments because Sentinel rejects rule queries over 10,000 characters. The explanations are here instead.
 - `BulkRolloutContext` says how many users registered FIDO2 keys or passkeys in the same window. During a passkey rollout the analyst can see right away that the alert is part of a wave.
 
 ## Tuning before enabling
@@ -51,7 +52,7 @@ The alert fires at a score of 4 or more and lists every signal that counted in `
 | `scoreThreshold` | Backtest first. Run the query with `runEnd` set to past dates across the last 30 days, mark which results were real, and see where they land |
 
 ## Blind spots
-- Quiet takeovers that score low. An attacker on a VPN in the user's own country, using a stolen session with no risk detections, adding Authenticator, scores 2 (new IP 1 + unmanaged 1). Lower the threshold for privileged accounts, or add a token replay signal (same session ID from a new ASN).
+- Quiet takeovers that score low. An attacker on a VPN in the user's own country, using a stolen session with no risk detections, adding Authenticator, scores 2 (new IP 1 + unmanaged 1). Lower the threshold for privileged accounts. The [session replay rule](../../credential-access/aitm-session-replay/) catches the stolen session itself.
 - `UpdateInboxRules` from the Outlook client often has empty `Parameters`, so rules made in the client aren't seen here. See [inbox-forwarding-external](../../collection/inbox-forwarding-external/).
 - Changes made by an app through Graph, with no user as initiator, only score on the user's other signals.
 

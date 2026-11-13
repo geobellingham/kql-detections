@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Validates every detection in the repo:
-//   1. rule.yaml has the required Sentinel analytic-rule fields and a unique id
+//   1. rule.yaml has the required Sentinel analytic-rule fields, a unique id and a query under 10,000 characters
 //   2. the KQL parses and binds against tools/schemas.json (Microsoft's Kusto.Language parser)
 // Hunting queries (*.kql under hunting/) get the KQL check only.
 //
@@ -50,6 +50,7 @@ function checkKql(text) {
 const REQUIRED = ["id", "name", "description", "severity", "requiredDataConnectors", "queryFrequency",
   "queryPeriod", "triggerOperator", "triggerThreshold", "tactics", "relevantTechniques", "query", "version", "kind"];
 const SEVERITIES = ["Informational", "Low", "Medium", "High"];
+const MAX_QUERY = 10000;   // Sentinel rejects scheduled rule queries longer than this
 const ids = new Map();
 
 function walk(dir, out = []) {
@@ -79,6 +80,8 @@ for (const file of walk(path.join(root, "detections")).filter(f => f.endsWith("r
     ids.set(rule.id, path.relative(root, file));
   }
   if (!fs.existsSync(path.join(path.dirname(file), "README.md"))) errs.push("missing README.md (ADS write-up)");
+  if (rule.query && rule.query.length > MAX_QUERY)
+    errs.push(`query is ${rule.query.length} characters, Sentinel allows ${MAX_QUERY}`);
   if (rule.query) errs.push(...checkKql(rule.query));
   report(file, errs);
 }

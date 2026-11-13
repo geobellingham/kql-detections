@@ -63,7 +63,7 @@ docs/             ADS template for new rules
 
 Every push runs [`tools/validate.js`](tools/validate.js) in GitHub Actions. It:
 
-1. Checks each `rule.yaml` has the required Sentinel fields, a valid severity and a unique `id`, and that there's a README.
+1. Checks each `rule.yaml` has the required Sentinel fields, a valid severity, a unique `id` and a query under Sentinel's 10,000-character limit, and that there's a README.
 2. Parses and binds every query with Microsoft's KQL parser ([`Kusto.Language`](https://github.com/microsoft/Kusto-Query-Language)) against the table schemas in [`tools/schemas.json`](tools/schemas.json). This catches syntax errors, misspelled columns and type errors before a rule gets near a workspace.
 3. For every detection with a file in [`tests/fixtures/`](tests/fixtures/), binds the rule against the sample tables in that file. This confirms the sample data has every column the rule needs. Each file says what result to expect in `// EXPECT:` lines.
 
